@@ -24,8 +24,17 @@ $__mc_config_file = __DIR__ . '/config.php';
 if (!is_file($__mc_config_file)) {
     $__mc_config_file = __DIR__ . '/config.sample.php';
 }
-/** @var array $config */
-$config = require $__mc_config_file;
+/**
+ * Load into $GLOBALS explicitly: this file may be included from within a
+ * function/method scope (e.g. App\Auth::loadHelper()), in which case a bare
+ * `$config = ...` would be a local variable and every `global $config;` in the
+ * helpers below would see null. Assigning to $GLOBALS guarantees the helpers
+ * always find it.
+ *
+ * @var array $config
+ */
+$GLOBALS['config'] = require $__mc_config_file;
+$config = $GLOBALS['config'];
 
 // ---------------------------------------------------------------------
 // Signature utilities
