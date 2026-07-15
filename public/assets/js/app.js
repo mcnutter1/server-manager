@@ -619,10 +619,12 @@
                 '<div class="field"><label>Name</label><input name="name" value="' + H.esc(prefill.name || '') + '"></div>' +
                 '<div class="field"><label>Path</label><input name="path" value="' + H.esc(prefill.path || '/var/www/') + '"></div>' +
                 '<div class="field"><label>Domain</label><input name="domain" placeholder="app.mcnutt.cloud"></div>' +
+                '<div class="field"><label>Helper URL <span class="muted">(full URL to helper.php)</span></label>' +
+                '<input name="helper_url" placeholder="https://app.mcnutt.cloud/srvmgr/helper.php"></div>' +
                 '<div class="field"><label>Repo URL</label><input name="repo_url" placeholder="git@…"></div>' +
                 '<div class="field"><label>Database name</label><input name="db_name"></div>' +
                 '<div class="field"><label>Health URL</label><input name="health_url" placeholder="https://app.mcnutt.cloud/health"></div>' +
-                '<div class="field"><label>Helper token</label><input name="helper_token" placeholder="shared secret for helper.php"></div>',
+                '<div class="field"><label>Helper token <span class="muted">(or pair instead)</span></label><input name="helper_token" placeholder="shared secret for helper.php"></div>',
                 (d, close) => {
                     if (!d.name || !d.path) { UI.toast('warn', 'Name and path required'); return; }
                     API.post('/apps', d).then((res) => {
@@ -645,7 +647,8 @@
                 '<div class="field"><label>Database name</label><input name="db_name" value="' + H.esc(app.db_name || '') + '"></div>' +
                 '<div class="field"><label>Service name</label><input name="service_name" value="' + H.esc(app.service_name || '') + '"></div>' +
                 '<div class="field"><label>Health URL</label><input name="health_url" value="' + H.esc(app.health_url || '') + '"></div>' +
-                '<div class="field"><label>Helper path</label><input name="helper_path" value="' + H.esc(app.helper_path || 'srvmgr/helper.php') + '"></div>' +
+                '<div class="field"><label>Helper URL <span class="muted">(full URL to helper.php)</span></label>' +
+                '<input name="helper_url" value="' + H.esc(app.helper_url || '') + '" placeholder="https://app.mcnutt.cloud/srvmgr/helper.php"></div>' +
                 '<div class="field"><label>Status</label><select name="status">' +
                     '<option ' + sel('active', app.status) + '>active</option>' +
                     '<option ' + sel('disabled', app.status) + '>disabled</option>' +
@@ -662,46 +665,71 @@
                 }, 'Save');
         },
         pairModal() {
-            UI.modal('Pair application',
-                '<div class="card" style="margin:0 0 14px;padding:12px 14px">' +
-                '<strong>Step 1 — unlock the app</strong>' +
-                '<p class="muted" style="margin:6px 0">Generate a one-time unlock code, then enter it on the app\'s ' +
-                'helper page (<span class="mono">https://&lt;app&gt;/srvmgr/helper.php</span>). ' +
-                'That proves you\'re acting from this manager and reveals the app\'s enrollment key.</p>' +
-                '<button class="btn small" id="genCodeBtn" type="button">Generate unlock code</button>' +
-                '<div id="unlockCodeBox" style="margin-top:8px"></div></div>' +
-                '<div class="card" style="margin:0;padding:12px 14px">' +
-                '<strong>Step 2 — finish pairing</strong>' +
-                '<p class="muted" style="margin:6px 0">Paste the enrollment key the app showed after unlocking.</p>' +
-                '<div class="field"><label>Enrollment key <span class="muted">(auto-fills URL + challenge)</span></label>' +
-                '<input name="enroll_key" placeholder="base64 enrollment key from the helper page"></div>' +
-                '<div class="field"><label>…or Helper URL + Challenge</label>' +
-                '<input name="helper_url" placeholder="https://app.mcnutt.cloud/srvmgr/helper.php"></div>' +
-                '<div class="field"><label>Challenge key</label><input name="challenge" placeholder="XXXX-XXXX-XXXX-XXXX"></div>' +
-                '<div class="field"><label>Name</label><input name="name" placeholder="My app"></div>' +
-                '<div class="field"><label>Path</label><input name="path" value="/var/www/"></div>' +
-                '<div class="field"><label>Health URL <span class="muted">(optional)</span></label>' +
-                '<input name="health_url" placeholder="https://app.mcnutt.cloud/health"></div></div>',
-                (d, close) => {
-                    if (!d.enroll_key && !d.challenge) { UI.toast('warn', 'Enrollment or challenge key required'); return; }
-                    if (!d.path) { UI.toast('warn', 'Path required'); return; }
-                    UI.toast('info', 'Pairing…', 'Contacting the app helper');
-                    API.post('/apps/enroll', d).then((res) => {
-                        if (res.data.ok) { UI.toast('success', 'Paired', d.name || res.data.app && res.data.app.slug || 'app'); close(); Views.apps.load(); $('#discoverResults').empty(); }
-                        else UI.toast('error', 'Pairing failed', res.data.error);
+            API.get('/apps').then((r) => {
+                const apps = (r.data || []).filter((a) => a && a.slug);
+                const opts = ['<option value="">— New app —</option>'].concat(
+                    apps.map((a) => '<option value="' + a.id + '">' + H.esc(a.name || a.slug) +
+                        (a.domain ? ' (' + H.esc(a.domain) + ')' : '') +
+                        (a.helper_token ? ' • paired' : '') + '</option>')
+                ).join('');
+                UI.modal('Pair application',
+                    '<div class="card" style="margin:0 0 14px;padding:12px 14px">' +
+                    '<strong>Step 1 — choose the app</strong>' +
+                    '<p class="muted" style="margin:6px 0">Pick an existing registration to attach the secret to, ' +
+                    'or start a new one. Pairing writes the shared secret into the selected app.</p>' +
+                    '<div class="field"><select id="pairAppSelect">' + opts + '</select></div>' +
+                    '<input type="hidden" name="slug"></div>' +
+                    '<div class="card" style="margin:0 0 14px;padding:12px 14px">' +
+                    '<strong>Step 2 — unlock the app</strong>' +
+                    '<p class="muted" style="margin:6px 0">Generate a one-time unlock code, then enter it on the app\'s ' +
+                    'helper page (<span class="mono">https://&lt;app&gt;/srvmgr/helper.php</span>). ' +
+                    'That proves you\'re acting from this manager and reveals the app\'s enrollment key.</p>' +
+                    '<button class="btn small" id="genCodeBtn" type="button">Generate unlock code</button>' +
+                    '<div id="unlockCodeBox" style="margin-top:8px"></div></div>' +
+                    '<div class="card" style="margin:0;padding:12px 14px">' +
+                    '<strong>Step 3 — finish pairing</strong>' +
+                    '<p class="muted" style="margin:6px 0">Paste the enrollment key the app showed after unlocking.</p>' +
+                    '<div class="field"><label>Enrollment key <span class="muted">(auto-fills URL + challenge)</span></label>' +
+                    '<input name="enroll_key" placeholder="base64 enrollment key from the helper page"></div>' +
+                    '<div class="field"><label>…or Helper URL + Challenge</label>' +
+                    '<input name="helper_url" placeholder="https://app.mcnutt.cloud/srvmgr/helper.php"></div>' +
+                    '<div class="field"><label>Challenge key</label><input name="challenge" placeholder="XXXX-XXXX-XXXX-XXXX"></div>' +
+                    '<div class="field"><label>Name</label><input name="name" placeholder="My app"></div>' +
+                    '<div class="field"><label>Path</label><input name="path" value="/var/www/"></div>' +
+                    '<div class="field"><label>Health URL <span class="muted">(optional)</span></label>' +
+                    '<input name="health_url" placeholder="https://app.mcnutt.cloud/health"></div></div>',
+                    (d, close) => {
+                        if (!d.enroll_key && !d.challenge) { UI.toast('warn', 'Enrollment or challenge key required'); return; }
+                        if (!d.path) { UI.toast('warn', 'Path required'); return; }
+                        UI.toast('info', 'Pairing…', 'Contacting the app helper');
+                        API.post('/apps/enroll', d).then((res) => {
+                            if (res.data.ok) { UI.toast('success', 'Paired', d.name || res.data.app && res.data.app.slug || 'app'); close(); Views.apps.load(); $('#discoverResults').empty(); }
+                            else UI.toast('error', 'Pairing failed', res.data.error);
+                        });
+                    }, 'Pair');
+                // Selecting an existing registration pre-fills the pairing fields.
+                $('#pairAppSelect').on('change', function () {
+                    const app = apps.find((a) => String(a.id) === String($(this).val()));
+                    const $m = $(this).closest('.modal');
+                    if (!app) { $m.find('[name=slug]').val(''); return; }
+                    $m.find('[name=slug]').val(app.slug || '');
+                    $m.find('[name=name]').val(app.name || '');
+                    $m.find('[name=path]').val(app.path || '/var/www/');
+                    $m.find('[name=helper_url]').val(app.helper_url || '');
+                    $m.find('[name=health_url]').val(app.health_url || '');
+                });
+                $('#genCodeBtn').on('click', function () {
+                    const $btn = $(this).prop('disabled', true).text('Generating…');
+                    API.post('/apps/pair/code', {}).then((res) => {
+                        $btn.prop('disabled', false).text('Regenerate unlock code');
+                        if (res.data && res.data.code) {
+                            const mins = Math.round((res.data.expires_in || 900) / 60);
+                            $('#unlockCodeBox').html('<div class="mono" style="font-size:20px;letter-spacing:2px;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:12px 14px;color:#7dd3fc">' +
+                                H.esc(res.data.code) + '</div><span class="muted">Enter this on the app\'s helper page — valid for ' + mins + ' min.</span>');
+                        } else {
+                            UI.toast('error', 'Could not issue code', (res.data && res.data.error) || '');
+                        }
                     });
-                }, 'Pair');
-            $('#genCodeBtn').on('click', function () {
-                const $btn = $(this).prop('disabled', true).text('Generating…');
-                API.post('/apps/pair/code', {}).then((res) => {
-                    $btn.prop('disabled', false).text('Regenerate unlock code');
-                    if (res.data && res.data.code) {
-                        const mins = Math.round((res.data.expires_in || 900) / 60);
-                        $('#unlockCodeBox').html('<div class="mono" style="font-size:20px;letter-spacing:2px;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:12px 14px;color:#7dd3fc">' +
-                            H.esc(res.data.code) + '</div><span class="muted">Enter this on the app\'s helper page — valid for ' + mins + ' min.</span>');
-                    } else {
-                        UI.toast('error', 'Could not issue code', (res.data && res.data.error) || '');
-                    }
                 });
             });
         }

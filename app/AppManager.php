@@ -48,6 +48,23 @@ final class AppManager
             return ['ok' => false, 'error' => 'path must be inside ' . config('app.apps_root')];
         }
 
+        // The helper is addressed by a single full URL. Accept a legacy
+        // domain + helper_path and fold them into helper_url; derive the
+        // display domain from the URL host when not given explicitly.
+        $helperUrl = trim((string) ($input['helper_url'] ?? ''));
+        $domain    = trim((string) ($input['domain'] ?? ''));
+        if ($helperUrl === '' && $domain !== '') {
+            $helperUrl = rtrim('https://' . $domain, '/') . '/'
+                . ltrim((string) ($input['helper_path'] ?? 'srvmgr/helper.php'), '/');
+        }
+        if ($helperUrl !== '' && $domain === '') {
+            $host = (string) (parse_url($helperUrl, PHP_URL_HOST) ?: '');
+            $port = parse_url($helperUrl, PHP_URL_PORT);
+            if ($host !== '') {
+                $domain = $port && !in_array((int) $port, [80, 443], true) ? "{$host}:{$port}" : $host;
+            }
+        }
+
         $db = Database::instance();
         $existing = $db->one('SELECT id FROM managed_apps WHERE slug = ? OR path = ?', [$slug, $path]);
 
@@ -56,13 +73,13 @@ final class AppManager
             'name'         => $input['name'] ?? $slug,
             'description'  => $input['description'] ?? null,
             'path'         => $path,
-            'domain'       => $input['domain'] ?? null,
+            'domain'       => $domain !== '' ? $domain : null,
             'repo_url'     => $input['repo_url'] ?? null,
             'db_name'      => $input['db_name'] ?? null,
             'db_user'      => $input['db_user'] ?? null,
             'service_name' => $input['service_name'] ?? null,
             'health_url'   => $input['health_url'] ?? null,
-            'helper_path'  => $input['helper_path'] ?? 'srvmgr/helper.php',
+            'helper_url'   => $helperUrl !== '' ? $helperUrl : null,
             'helper_token' => $input['helper_token'] ?? null,
             'status'       => $input['status'] ?? 'active',
             'managed'      => 1,
@@ -101,7 +118,7 @@ final class AppManager
 
         // Free-text fields: empty string clears them to NULL.
         foreach (['name', 'description', 'domain', 'repo_url', 'db_name',
-                  'db_user', 'service_name', 'health_url', 'helper_path'] as $f) {
+                  'db_user', 'service_name', 'health_url', 'helper_url'] as $f) {
             if (array_key_exists($f, $input)) {
                 $v = is_string($input[$f]) ? trim($input[$f]) : $input[$f];
                 $data[$f] = ($v === '' || $v === null) ? null : $v;
@@ -110,6 +127,17 @@ final class AppManager
 
         if (array_key_exists('name', $data) && $data['name'] === null) {
             return ['ok' => false, 'error' => 'name cannot be empty'];
+        }
+
+        // When the helper URL changes and no domain was supplied, keep the
+        // display domain in sync by deriving it from the URL host.
+        if (array_key_exists('helper_url', $data) && $data['helper_url'] !== null
+            && !array_key_exists('domain', $data)) {
+            $host = (string) (parse_url($data['helper_url'], PHP_URL_HOST) ?: '');
+            $port = parse_url($data['helper_url'], PHP_URL_PORT);
+            if ($host !== '') {
+                $data['domain'] = $port && !in_array((int) $port, [80, 443], true) ? "{$host}:{$port}" : $host;
+            }
         }
 
         if (array_key_exists('path', $input)) {
@@ -218,7 +246,7 @@ final class AppManager
             'slug'         => $input['slug'] ?? ($input['name'] ?? $domain),
             'path'         => $input['path'] ?? '',
             'domain'       => $domain,
-            'helper_path'  => $helperPath,
+            'helper_url'   => $base,
             'helper_token' => $secret,
             'health_url'   => $input['health_url'] ?? null,
             'repo_url'     => $input['repo_url'] ?? null,

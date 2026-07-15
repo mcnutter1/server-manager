@@ -104,8 +104,10 @@ CREATE TABLE IF NOT EXISTS managed_apps (
     db_user       VARCHAR(120)    NULL,
     service_name  VARCHAR(120)    NULL,               -- optional systemd unit
     health_url    VARCHAR(255)    NULL,               -- optional HTTP health check
-    -- Path (relative to app root) to a "helper" the app exposes so this
-    -- platform can interface with it in a common way. See docs/APP_HELPER.md
+    -- Full URL to the "helper" the app exposes so this platform can interface
+    -- with it in a common way (e.g. https://app.example.com/srvmgr/helper.php).
+    -- See docs/APP_HELPER.md. helper_path is the legacy split form.
+    helper_url    VARCHAR(255)    NULL,
     helper_path   VARCHAR(255)    NULL DEFAULT 'srvmgr/helper.php',
     helper_token  VARCHAR(190)    NULL,
     status        ENUM('active','disabled','maintenance','unmanaged') NOT NULL DEFAULT 'active',
@@ -319,5 +321,5 @@ CREATE TABLE IF NOT EXISTS pairing_codes (
 
 -- Seed a couple of defaults.
 INSERT INTO settings (skey, svalue) VALUES
-    ('schema_version', '"1.2.0"')
+    ('schema_version', '"1.3.0"')
 ON DUPLICATE KEY UPDATE svalue = VALUES(svalue);
