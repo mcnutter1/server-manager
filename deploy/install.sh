@@ -199,10 +199,46 @@ install_packages() {
     systemctl enable --now apache2 >/dev/null 2>&1 || true
 
     # certbot only when we intend to use it.
-    if [ "${ENABLE_SSL,,}" = "y" ]; then
-        apt-get install -y -qq certbot python3-certbot-apache >/dev/null || c_warn "certbot install failed; skipping SSL."
-    fi
+    [ "${ENABLE_SSL,,}" = "y" ] && ensure_certbot
     c_ok "Packages installed."
+}
+
+# Install a WORKING certbot. The apt package (certbot 2.9.0) ships a
+# pyOpenSSL that is incompatible with the system 'cryptography' and dies with
+# "module 'lib' has no attribute 'GEN_EMAIL'". Certbot's own recommendation is
+# the snap build, which bundles its own deps. We prefer snap and fall back to
+# apt only if snap is unavailable.
+ensure_certbot() {
+    # Already have a working snap certbot?
+    if [ -x /snap/bin/certbot ] && /snap/bin/certbot --version >/dev/null 2>&1; then
+        ln -sf /snap/bin/certbot /usr/bin/certbot
+        return 0
+    fi
+    # Is the current certbot (if any) actually functional?
+    if command -v certbot >/dev/null 2>&1 && certbot --version >/dev/null 2>&1; then
+        return 0
+    fi
+
+    c_info "Installing certbot via snap (recommended)…"
+    # Remove the broken apt certbot to avoid PATH/dep conflicts.
+    apt-get remove -y -qq certbot python3-certbot-apache >/dev/null 2>&1 || true
+    if ! command -v snap >/dev/null 2>&1; then
+        apt-get install -y -qq snapd >/dev/null 2>&1 || true
+        systemctl enable --now snapd.socket >/dev/null 2>&1 || true
+        systemctl start snapd >/dev/null 2>&1 || true
+    fi
+    if command -v snap >/dev/null 2>&1; then
+        snap install core >/dev/null 2>&1 || true
+        snap refresh core >/dev/null 2>&1 || true
+        if snap install --classic certbot >/dev/null 2>&1; then
+            ln -sf /snap/bin/certbot /usr/bin/certbot
+            c_ok "certbot (snap) installed."
+            return 0
+        fi
+    fi
+    # Last resort: apt (may still be broken, but better than nothing).
+    c_warn "snap certbot unavailable; falling back to apt certbot."
+    apt-get install -y -qq certbot python3-certbot-apache >/dev/null 2>&1 || c_warn "certbot install failed; skipping SSL."
 }
 
 # =====================================================================
@@ -392,8 +428,9 @@ install_cert() {
         c_warn "Skipping HTTPS (ENABLE_SSL != y)."
         return
     fi
-    if ! command -v certbot >/dev/null; then
-        c_warn "certbot not available; skipping HTTPS."
+    ensure_certbot
+    if ! command -v certbot >/dev/null || ! certbot --version >/dev/null 2>&1; then
+        c_warn "certbot not available/working; skipping HTTPS."
         return
     fi
     c_info "Requesting Let's Encrypt certificate for ${SERVER_NAME}…"
@@ -401,7 +438,7 @@ install_cert() {
         -m "${SERVER_ADMIN_EMAIL}" --redirect >/dev/null 2>&1; then
         c_ok "HTTPS provisioned + auto-redirect enabled."
     else
-        c_warn "certbot failed (DNS not pointed yet?). Re-run later: certbot --apache -d ${SERVER_NAME}"
+        c_warn "certbot failed (DNS not pointed yet?). Re-run later: sudo certbot --apache -d ${SERVER_NAME}"
     fi
 }
 
@@ -491,13 +528,15 @@ EOF
         chgrp -R "$WEB_USER" /etc/secrets; chmod 710 /etc/secrets; chmod 640 /etc/secrets/github_pat
     fi
 
-    # Initialise git in APP_DIR for future pulls.
+    # Initialise git in APP_DIR for future pulls. Trust the dir system-wide so
+    # both root and the web user can run git here (avoids "dubious ownership").
+    git config --system --add safe.directory "$APP_DIR" 2>/dev/null || true
     if [ ! -d "$APP_DIR/.git" ]; then
-        sudo -u "$WEB_USER" git -C "$APP_DIR" init -q 2>/dev/null || git -C "$APP_DIR" init -q
+        sudo -u "$WEB_USER" git -C "$APP_DIR" init -q
     fi
-    git -C "$APP_DIR" remote set-url origin "$REPO_URL" 2>/dev/null \
-        || git -C "$APP_DIR" remote add origin "$REPO_URL"
-    git -C "$APP_DIR" config core.fileMode false
+    sudo -u "$WEB_USER" git -C "$APP_DIR" remote set-url origin "$REPO_URL" 2>/dev/null \
+        || sudo -u "$WEB_USER" git -C "$APP_DIR" remote add origin "$REPO_URL"
+    sudo -u "$WEB_USER" git -C "$APP_DIR" config core.fileMode false
     # Persist branch for update.sh.
     printf 'REPO_URL=%s\nGIT_BRANCH=%s\n' "$REPO_URL" "$GIT_BRANCH" > "$APP_DIR/deploy/.deploy.env"
     chown "$WEB_USER:$WEB_USER" "$APP_DIR/deploy/.deploy.env"

@@ -66,6 +66,9 @@ check_prereqs() {
     chgrp "$RUN_AS" "$ASKPASS" 2>/dev/null || true; chmod 750 "$ASKPASS"
     chgrp -R "$RUN_AS" "$(dirname "$TOKEN_FILE")" 2>/dev/null || true
     chmod 710 "$(dirname "$TOKEN_FILE")"; chmod 640 "$TOKEN_FILE"
+    # Trust the working dir system-wide so root and the web user can run git
+    # here without "dubious ownership" errors.
+    git config --system --add safe.directory "$APP_DIR" 2>/dev/null || true
 }
 
 ensure_repo_initialized() {
