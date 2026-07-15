@@ -528,6 +528,12 @@ EOF
 
     systemctl daemon-reload
     systemctl enable --now srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer >/dev/null 2>&1 || true
+
+    # The traffic worker parses apache access logs, which are root:adm 640.
+    # Add the worker user to 'adm' so it can read them (else the map has no
+    # "allow" traffic). Takes effect on the next worker run.
+    usermod -aG adm "$WEB_USER" 2>/dev/null || true
+
     c_ok "Worker timers enabled."
 }
 

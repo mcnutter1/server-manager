@@ -222,6 +222,11 @@ reload_services() {
 # Install the traffic worker unit + timer on existing deployments that predate
 # the traffic map feature. Idempotent: only writes when the unit is missing.
 ensure_traffic_timer() {
+    # The traffic worker parses apache access logs (root:adm 640). Make sure the
+    # worker user can read them, else the map shows no "allow" traffic. Safe to
+    # run every update; takes effect on the next worker run.
+    usermod -aG adm "$RUN_AS" 2>/dev/null || true
+
     [ -f /etc/systemd/system/srvmgr-traffic.timer ] && return 0
     local php_bin; php_bin="$(command -v php)"
     [ -n "$php_bin" ] || return 0

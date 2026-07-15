@@ -216,6 +216,12 @@ $post('/apps', static function () use ($input) {
     Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
 });
 
+$post('/apps/(?<id>\d+)', static function ($p) use ($input) {
+    Auth::requirePrivileged('apps');
+    $result = AppManager::update((int) $p['id'], $input);
+    Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
+});
+
 $post('/apps/enroll', static function () use ($input) {
     Auth::requirePrivileged('apps');
     $result = AppManager::enroll($input);

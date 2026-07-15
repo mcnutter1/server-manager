@@ -131,7 +131,12 @@ return [
     // -----------------------------------------------------------------
     'traffic' => [
         'enabled'           => true,
-        'apache_access'     => '/var/log/apache2/access.log',
+        // Access log(s) to parse for accepted ("allow") traffic. May be a single
+        // path, a glob, or an array of either. The default glob captures the
+        // manager's own vhost log + every app's vhost log. The worker user
+        // (RUN_AS, default www-data) must be able to read these — the installer
+        // adds it to the 'adm' group for that.
+        'apache_access'     => '/var/log/apache2/*access*.log',
         'max_lines_per_run' => 20000,   // cap per ingest cycle
         'app_log_lines'     => 200,     // lines requested from each app helper
         'collect_app_logs'  => true,    // pull per-app logs via the health helper

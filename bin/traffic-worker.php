@@ -36,3 +36,7 @@ fwrite(STDOUT, sprintf(
     $r['app'] ?? 0,
     $r['ips'] ?? 0
 ));
+
+foreach (($r['warnings'] ?? []) as $w) {
+    fwrite(STDERR, "[warn] {$w}\n");
+}

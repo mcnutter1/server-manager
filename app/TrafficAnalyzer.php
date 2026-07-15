@@ -59,52 +59,70 @@ final class TrafficAnalyzer
             'block'    => $block['rows'],
             'app'      => $app['rows'],
             'ips'      => count($ips),
+            'warnings' => $allow['warnings'] ?? [],
         ];
     }
 
     /**
-     * Parse new lines from the apache access log and aggregate per source IP.
+     * Parse new lines from every apache access log and aggregate per source IP.
      *
-     * @return array{rows:int,ips:string[]}
+     * The log location (traffic.apache_access) may be a single path, an array
+     * of paths, or a glob (e.g. /var/log/apache2/*access*.log). For a plain
+     * file path we also fold in sibling *access*.log files in the same dir, so
+     * per-vhost logs (the manager's own site + each app) are all captured even
+     * when config still names the stock access.log.
+     *
+     * @return array{rows:int,ips:string[],warnings:string[]}
      */
-    private static function ingestApache(string $window): array
+    private static function ingestApache(string|array|null $windowArg = null): array
     {
-        $path = (string) config('traffic.apache_access', config('nids.apache_access', '/var/log/apache2/access.log'));
-        if ($path === '' || !is_readable($path)) {
-            return ['rows' => 0, 'ips' => []];
+        // Back-compat: the method used to take the window string as its arg.
+        $window = is_string($windowArg) ? $windowArg : date('Y-m-d H:i:s');
+
+        $configured = config('traffic.apache_access', config('nids.apache_access', '/var/log/apache2/*access*.log'));
+        [$files, $warnings] = self::resolveAccessLogs($configured);
+        if ($files === []) {
+            return ['rows' => 0, 'ips' => [], 'warnings' => $warnings];
         }
 
         $maxLines = (int) config('traffic.max_lines_per_run', 20000);
-        $lines = self::readNewLines($path, $maxLines);
-        if ($lines === []) {
-            return ['rows' => 0, 'ips' => []];
+
+        // Aggregate across all logs: ip => [requests, bytes, errors, method, path, status]
+        $agg = [];
+        foreach ($files as $path) {
+            $remaining = $maxLines - array_sum(array_map(static fn ($a) => $a['requests'], $agg));
+            if ($remaining <= 0) {
+                break;
+            }
+            $lines = self::readNewLines($path, $remaining);
+            foreach ($lines as $line) {
+                if (!preg_match(self::ACCESS_RE, $line, $m)) {
+                    continue;
+                }
+                $ip = $m[1];
+                if (!is_valid_ip($ip)) {
+                    continue;
+                }
+                $status = (int) $m[4];
+                $bytes  = $m[5] === '-' ? 0 : (int) $m[5];
+
+                if (!isset($agg[$ip])) {
+                    $agg[$ip] = ['requests' => 0, 'bytes' => 0, 'errors' => 0,
+                                 'method' => $m[2], 'path' => $m[3], 'status' => $status,
+                                 'paths' => []];
+                }
+                $agg[$ip]['requests']++;
+                $agg[$ip]['bytes'] += $bytes;
+                if ($status >= 400) {
+                    $agg[$ip]['errors']++;
+                }
+                $p = $m[3];
+                $agg[$ip]['paths'][$p] = ($agg[$ip]['paths'][$p] ?? 0) + 1;
+            }
         }
 
-        // Aggregate: ip => [requests, bytes, errors, method, path, status]
-        $agg = [];
-        foreach ($lines as $line) {
-            if (!preg_match(self::ACCESS_RE, $line, $m)) {
-                continue;
-            }
-            $ip = $m[1];
-            if (!is_valid_ip($ip)) {
-                continue;
-            }
-            $status = (int) $m[4];
-            $bytes  = $m[5] === '-' ? 0 : (int) $m[5];
-
-            if (!isset($agg[$ip])) {
-                $agg[$ip] = ['requests' => 0, 'bytes' => 0, 'errors' => 0,
-                             'method' => $m[2], 'path' => $m[3], 'status' => $status,
-                             'paths' => []];
-            }
-            $agg[$ip]['requests']++;
-            $agg[$ip]['bytes'] += $bytes;
-            if ($status >= 400) {
-                $agg[$ip]['errors']++;
-            }
-            $p = $m[3];
-            $agg[$ip]['paths'][$p] = ($agg[$ip]['paths'][$p] ?? 0) + 1;
+        if ($agg === []) {
+            return ['rows' => 0, 'ips' => [], 'warnings' => $warnings];
         }
 
         $db = Database::instance();
@@ -126,8 +144,61 @@ final class TrafficAnalyzer
             $rows++;
         }
 
-        return ['rows' => $rows, 'ips' => array_keys($agg)];
+        return ['rows' => $rows, 'ips' => array_keys($agg), 'warnings' => $warnings];
     }
+
+    /**
+     * Resolve the configured access-log location into a list of readable log
+     * files, plus a list of human-readable warnings for anything unreadable
+     * (the #1 cause of an empty map: the worker user can't read the logs).
+     *
+     * @return array{0:string[],1:string[]}
+     */
+    private static function resolveAccessLogs(string|array|null $configured): array
+    {
+        $patterns = is_array($configured) ? $configured : [(string) $configured];
+        $candidates = [];
+        foreach ($patterns as $pat) {
+            $pat = trim((string) $pat);
+            if ($pat === '') {
+                continue;
+            }
+            if (strpbrk($pat, '*?[') !== false) {
+                foreach ((glob($pat) ?: []) as $g) {
+                    $candidates[$g] = true;
+                }
+            } else {
+                $candidates[$pat] = true;
+                // Fold in sibling per-vhost access logs in the same directory.
+                foreach ((glob(dirname($pat) . '/*access*.log') ?: []) as $g) {
+                    $candidates[$g] = true;
+                }
+            }
+        }
+
+        $files = [];
+        $warnings = [];
+        foreach (array_keys($candidates) as $path) {
+            if (!is_file($path)) {
+                continue;
+            }
+            if (is_readable($path)) {
+                $files[] = $path;
+            } else {
+                $warnings[] = "access log not readable by " . (function_exists('posix_getpwuid')
+                    ? (posix_getpwuid(posix_geteuid())['name'] ?? 'worker') : 'worker')
+                    . ": {$path} (add the worker user to the 'adm' group)";
+            }
+        }
+
+        if ($files === [] && $warnings === []) {
+            $shown = is_array($configured) ? implode(', ', $configured) : (string) $configured;
+            $warnings[] = "no apache access logs matched: {$shown}";
+        }
+
+        return [$files, $warnings];
+    }
+
 
     /**
      * Record firewall-dropped traffic from the iptables byte counters, tagged

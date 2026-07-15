@@ -416,8 +416,17 @@
             });
             $('#trIngest').on('click', () => {
                 UI.toast('info', 'Ingesting traffic…');
-                API.post('/traffic/ingest', {}).then(() => { UI.toast('success', 'Ingest complete'); this.load(); })
-                    .catch(() => UI.toast('error', 'Ingest failed'));
+                API.post('/traffic/ingest', {}).then((r) => {
+                    const d = r.data || {};
+                    const warns = d.warnings || [];
+                    if (warns.length) {
+                        UI.toast('warn', 'Ingest complete (with warnings)', warns.join(' • '));
+                    } else {
+                        UI.toast('success', 'Ingest complete',
+                            'allow ' + (d.allow || 0) + ' · block ' + (d.block || 0) + ' · app ' + (d.app || 0));
+                    }
+                    this.load();
+                }).catch(() => UI.toast('error', 'Ingest failed'));
             });
             this.initMap();
             this.load();
@@ -565,6 +574,7 @@
                         '<td><span class="badge ' + H.esc(a.status) + '">' + H.esc(a.status) + '</span></td>' +
                         '<td>' + (a.last_health ? '<span class="badge ' + H.esc(a.last_health) + '">' + H.esc(a.last_health) + '</span>' : '<span class="muted">unknown</span>') + '</td>' +
                         '<td style="text-align:right"><button class="btn small ghost" data-health="' + a.id + '">Check</button>' +
+                        (SM.admin ? ' <button class="btn small" data-edit="' + a.id + '">Edit</button>' : '') +
                         (SM.admin ? ' <button class="btn small danger" data-remove="' + a.id + '">Remove</button>' : '') + '</td></tr>'
                     )).join('') : '<tr><td colspan="6" class="muted">No apps registered. Use Discover to find apps under /var/www.</td></tr>') +
                     '</tbody></table></div>');
@@ -573,6 +583,10 @@
                     API.post('/apps/' + id + '/health').then((res) => {
                         UI.toast('success', 'Health', 'Status: ' + (res.data.status || 'unknown')); Views.apps.load();
                     });
+                });
+                $('#appsTable [data-edit]').on('click', function () {
+                    const id = $(this).data('edit');
+                    API.get('/apps/' + id).then((res) => Views.apps.editModal(res.data));
                 });
                 $('#appsTable [data-remove]').on('click', function () {
                     const id = $(this).data('remove');
@@ -616,6 +630,36 @@
                         else UI.toast('error', 'Failed', res.data.error);
                     });
                 }, 'Register');
+        },
+        editModal(app) {
+            app = app || {};
+            const sel = (v, cur) => 'value="' + v + '"' + (cur === v ? ' selected' : '');
+            UI.modal('Edit ' + (app.name || 'application'),
+                '<div class="field"><label>Name</label><input name="name" value="' + H.esc(app.name || '') + '"></div>' +
+                '<div class="field"><label>Slug <span class="muted">(identity — read only)</span></label>' +
+                '<input value="' + H.esc(app.slug || '') + '" disabled></div>' +
+                '<div class="field"><label>Description</label><input name="description" value="' + H.esc(app.description || '') + '"></div>' +
+                '<div class="field"><label>Path</label><input name="path" value="' + H.esc(app.path || '') + '"></div>' +
+                '<div class="field"><label>Domain</label><input name="domain" value="' + H.esc(app.domain || '') + '" placeholder="app.mcnutt.cloud"></div>' +
+                '<div class="field"><label>Repo URL</label><input name="repo_url" value="' + H.esc(app.repo_url || '') + '"></div>' +
+                '<div class="field"><label>Database name</label><input name="db_name" value="' + H.esc(app.db_name || '') + '"></div>' +
+                '<div class="field"><label>Service name</label><input name="service_name" value="' + H.esc(app.service_name || '') + '"></div>' +
+                '<div class="field"><label>Health URL</label><input name="health_url" value="' + H.esc(app.health_url || '') + '"></div>' +
+                '<div class="field"><label>Helper path</label><input name="helper_path" value="' + H.esc(app.helper_path || 'srvmgr/helper.php') + '"></div>' +
+                '<div class="field"><label>Status</label><select name="status">' +
+                    '<option ' + sel('active', app.status) + '>active</option>' +
+                    '<option ' + sel('disabled', app.status) + '>disabled</option>' +
+                    '<option ' + sel('maintenance', app.status) + '>maintenance</option>' +
+                '</select></div>' +
+                '<div class="field"><label>Helper token <span class="muted">(leave blank to keep current)</span></label>' +
+                '<input name="helper_token" placeholder="•••••• set — unchanged"></div>',
+                (d, close) => {
+                    if (!d.name) { UI.toast('warn', 'Name required'); return; }
+                    API.post('/apps/' + app.id, d).then((res) => {
+                        if (res.data.ok) { UI.toast('success', 'Saved', d.name); close(); Views.apps.load(); }
+                        else UI.toast('error', 'Failed', res.data.error);
+                    });
+                }, 'Save');
         },
         pairModal() {
             UI.modal('Pair application',

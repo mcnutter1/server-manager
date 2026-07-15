@@ -85,6 +85,72 @@ final class AppManager
     }
 
     /**
+     * Edit an existing registration by id. Partial update: only the fields
+     * present in $input are changed. The slug (identity) is never altered here,
+     * and helper_token is only replaced when a non-empty value is supplied so
+     * the edit form can leave it blank to keep the current secret.
+     */
+    public static function update(int $id, array $input): array
+    {
+        $app = self::find($id);
+        if (!$app) {
+            return ['ok' => false, 'error' => 'app not found'];
+        }
+
+        $data = [];
+
+        // Free-text fields: empty string clears them to NULL.
+        foreach (['name', 'description', 'domain', 'repo_url', 'db_name',
+                  'db_user', 'service_name', 'health_url', 'helper_path'] as $f) {
+            if (array_key_exists($f, $input)) {
+                $v = is_string($input[$f]) ? trim($input[$f]) : $input[$f];
+                $data[$f] = ($v === '' || $v === null) ? null : $v;
+            }
+        }
+
+        if (array_key_exists('name', $data) && $data['name'] === null) {
+            return ['ok' => false, 'error' => 'name cannot be empty'];
+        }
+
+        if (array_key_exists('path', $input)) {
+            $path = rtrim((string) $input['path'], '/');
+            if ($path === '' || !self::pathAllowed($path)) {
+                return ['ok' => false, 'error' => 'path must be inside ' . config('app.apps_root')];
+            }
+            $data['path'] = $path;
+        }
+
+        if (array_key_exists('status', $input) && (string) $input['status'] !== '') {
+            $status = (string) $input['status'];
+            if (!in_array($status, ['active', 'disabled', 'maintenance'], true)) {
+                return ['ok' => false, 'error' => 'invalid status'];
+            }
+            $data['status'] = $status;
+        }
+
+        // Only overwrite the secret when a new one is actually provided.
+        if (!empty($input['helper_token'])) {
+            $data['helper_token'] = (string) $input['helper_token'];
+        }
+
+        if (array_key_exists('meta', $input)) {
+            $data['meta'] = $input['meta'] !== null ? json_encode($input['meta']) : null;
+        }
+
+        if ($data === []) {
+            return ['ok' => true, 'id' => $id, 'app' => $app];
+        }
+
+        $db = Database::instance();
+        $set = implode(', ', array_map(static fn ($k) => "{$k} = :{$k}", array_keys($data)));
+        $data['id'] = $id;
+        $db->exec("UPDATE managed_apps SET {$set} WHERE id = :id", $data);
+        AuditLogger::log('app.update', $app['slug'], ['id' => $id, 'fields' => array_keys($data)]);
+
+        return ['ok' => true, 'id' => $id, 'app' => self::find($id)];
+    }
+
+    /**
      * Enroll (pair) a downstream app using the one-time challenge it displays
      * on its helper page. We call the helper's unauthenticated `enroll` action
      * with the challenge, receive the app's self-generated secret over HTTPS,
