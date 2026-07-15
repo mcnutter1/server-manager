@@ -307,11 +307,12 @@ CREATE TABLE IF NOT EXISTS app_log_events (
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS pairing_codes (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    code_hash     CHAR(64)        NOT NULL,          -- sha256 of the code; plaintext never stored
+    code_hash     CHAR(64)        NOT NULL,          -- sha256 of the token jti; plaintext never stored
     label         VARCHAR(190)    NULL,
     created_by    VARCHAR(190)    NULL,
     used          INT UNSIGNED    NOT NULL DEFAULT 0,
     last_used_at  DATETIME        NULL,
+    completed_at  DATETIME        NULL,              -- set once when the token is redeemed (single use)
     expires_at    DATETIME        NOT NULL,
     created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id),
@@ -321,5 +322,5 @@ CREATE TABLE IF NOT EXISTS pairing_codes (
 
 -- Seed a couple of defaults.
 INSERT INTO settings (skey, svalue) VALUES
-    ('schema_version', '"1.3.0"')
+    ('schema_version', '"1.4.0"')
 ON DUPLICATE KEY UPDATE svalue = VALUES(svalue);

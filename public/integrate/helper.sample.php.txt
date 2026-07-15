@@ -21,20 +21,39 @@
  *   Body:   { "action": "health|stats|logs|version|clear_cache|maintenance|migrate|enroll", ... }
  *   Reply:  { "ok": true, "data": { ... } }
  *
- * Gated pairing (no secret to copy by hand):
- *   * On first run this helper generates its OWN shared secret from 256 bits
- *     of entropy and stores it outside the web root (see srvmgr_state_dir()).
+ * Gated pairing (air-tight, no secret to copy by hand):
+ *   * On first run this helper generates its OWN shared secret (256 bits) AND
+ *     its own Ed25519 keypair, both stored outside the web root (see
+ *     srvmgr_state_dir()).
  *   * The pairing page is LOCKED. In Server Manager choose Apps -> Pair app and
- *     generate an unlock CODE; enter that code on this app's helper page. The
- *     helper verifies it against the manager (SRVMGR_MANAGER_URL) before it
- *     reveals anything — so a stranger hitting this URL sees only a locked page.
- *   * Once unlocked, copy the CHALLENGE / ENROLLMENT KEY shown here back into
- *     Server Manager. The manager then calls back with the challenge and the
- *     helper hands over the secret ONCE, over HTTPS. After that, pairing is
- *     disabled. The secret itself is never shown to a human or typed anywhere.
+ *     generate a signed unlock TOKEN; paste that token on this app's helper
+ *     page. The helper verifies the token's Ed25519 signature against the
+ *     manager's public key (baked in at download, or fetched once from
+ *     <manager>/api/pair/pubkey) — OFFLINE, so it cannot be forged, spoofed or
+ *     replayed. A stranger hitting this URL sees only a locked page.
+ *   * Once unlocked, copy the SINGLE enrollment payload shown here back into
+ *     Server Manager. That one payload is self-signed by this app and contains
+ *     everything the manager needs — nothing else to type:
+ *
+ *       token = base64url(json).base64url(ed25519_sig_by_app)
+ *       json  = {
+ *         "v": 2, "typ": "enroll",
+ *         "url": "https://<app>/srvmgr/helper.php",  // full helper URL
+ *         "host": "<app-host>",
+ *         "challenge": "<one-time challenge>",
+ *         "jti": "<jti of the manager unlock token>", // binds app<->token
+ *         "app_pub": "<this app's ed25519 public key, base64url>",
+ *         "iat": <unix>, "exp": <unix>                // 15-minute window
+ *       }
+ *
+ *   * The manager verifies that payload, then calls back with the challenge
+ *     PLUS a manager-signed `claim` token bound to the same jti. This helper
+ *     checks that signature before handing over the secret ONCE, over HTTPS,
+ *     and permanently disables pairing. The secret is never shown to a human or
+ *     typed anywhere.
  *   * Config: download this helper pre-filled from your manager's
- *     /integrate/helper.php, or set SRVMGR_MANAGER_URL / edit
- *     SRVMGR_MANAGER_URL_DEFAULT below (a static SRVMGR_PAIR_CODE PIN also works).
+ *     /integrate/helper.php, or set SRVMGR_MANAGER_URL / SRVMGR_MANAGER_PUBKEY
+ *     (a static SRVMGR_PAIR_CODE PIN also works for the legacy online flow).
  */
 
 declare(strict_types=1);
@@ -55,6 +74,12 @@ header('Content-Type: application/json');
 // ---------------------------------------------------------------------
 const SRVMGR_MANAGER_URL_DEFAULT = '';
 const SRVMGR_PAIR_CODE_DEFAULT   = '';
+// The manager's Ed25519 public signing key (base64url). Baked in when you
+// download this helper pre-filled from your manager's /integrate/helper.php.
+// With it, this helper can verify a manager's unlock/claim tokens OFFLINE —
+// no network round-trip that an attacker could intercept or spoof. If empty,
+// the helper fetches it once from <manager>/api/pair/pubkey and pins it.
+const SRVMGR_MANAGER_PUBKEY_DEFAULT = '';
 
 /** Effective manager base URL: env var overrides the hard-coded default. */
 function srvmgr_manager_url(): string
@@ -66,6 +91,130 @@ function srvmgr_manager_url(): string
 function srvmgr_pair_code(): string
 {
     return (string) (getenv('SRVMGR_PAIR_CODE') ?: SRVMGR_PAIR_CODE_DEFAULT);
+}
+
+// ---------------------------------------------------------------------
+// Pairing cryptography (Ed25519 via libsodium, bundled with PHP 8).
+//
+//   * The MANAGER signs unlock + claim tokens with its private key. This
+//     helper verifies them against the manager's PUBLIC key — so a signed
+//     token cannot be forged, replayed (it carries a jti + expiry) or faked
+//     by anyone who is not the real manager.
+//   * This APP has its OWN keypair too. It self-signs the enrollment payload
+//     it shows the operator, so the manager can detect any tampering.
+// ---------------------------------------------------------------------
+
+function srvmgr_b64url(string $raw): string
+{
+    return rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
+}
+
+function srvmgr_b64url_decode(string $enc): string
+{
+    $dec = base64_decode(strtr(trim($enc), '-_', '+/'), true);
+    return $dec === false ? '' : $dec;
+}
+
+/** Effective manager public key (base64url): env/const, else fetch + pin once. */
+function srvmgr_manager_pubkey(): string
+{
+    $pk = trim((string) (getenv('SRVMGR_MANAGER_PUBKEY') ?: SRVMGR_MANAGER_PUBKEY_DEFAULT));
+    if ($pk !== '') {
+        return $pk;
+    }
+    // Pinned copy fetched previously?
+    $file = srvmgr_state_dir() . '/manager_pubkey';
+    $cur  = @file_get_contents($file);
+    if (is_string($cur) && trim($cur) !== '') {
+        return trim($cur);
+    }
+    // Fetch once from the configured manager and pin it (trust on first use).
+    $manager = srvmgr_manager_url();
+    if ($manager === '' || !function_exists('curl_init')) {
+        return '';
+    }
+    $ch = curl_init(rtrim($manager, '/') . '/api/pair/pubkey');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 10,
+    ]);
+    $resp = curl_exec($ch);
+    curl_close($ch);
+    $doc = is_string($resp) ? json_decode($resp, true) : null;
+    $pk  = is_array($doc) ? trim((string) ($doc['data']['pubkey'] ?? $doc['pubkey'] ?? '')) : '';
+    if ($pk !== '') {
+        @file_put_contents($file, $pk, LOCK_EX);
+        @chmod($file, 0600);
+    }
+    return $pk;
+}
+
+/**
+ * Verify a compact signed token (base64url(json).base64url(sig)) against a
+ * base64url public key. Returns the decoded payload, or null if bad.
+ */
+function srvmgr_verify_token(string $token, string $pubB64): ?array
+{
+    if (!function_exists('sodium_crypto_sign_verify_detached') || $pubB64 === '') {
+        return null;
+    }
+    $parts = explode('.', trim($token));
+    if (count($parts) !== 2) {
+        return null;
+    }
+    $json = srvmgr_b64url_decode($parts[0]);
+    $sig  = srvmgr_b64url_decode($parts[1]);
+    $pub  = srvmgr_b64url_decode($pubB64);
+    if ($json === '' || $sig === '' || strlen($pub) !== SODIUM_CRYPTO_SIGN_PUBLICKEYBYTES) {
+        return null;
+    }
+    try {
+        if (!sodium_crypto_sign_verify_detached($sig, $json, $pub)) {
+            return null;
+        }
+    } catch (\Throwable) {
+        return null;
+    }
+    $doc = json_decode($json, true);
+    return is_array($doc) ? $doc : null;
+}
+
+/** This app's persistent Ed25519 keypair (generated + stored 0600 on first use). */
+function srvmgr_app_keypair(): ?string
+{
+    if (!function_exists('sodium_crypto_sign_keypair')) {
+        return null;
+    }
+    $file = srvmgr_state_dir() . '/app_signkey';
+    $raw  = @file_get_contents($file);
+    $pair = is_string($raw) && $raw !== '' ? srvmgr_b64url_decode(trim($raw)) : '';
+    if (strlen($pair) === SODIUM_CRYPTO_SIGN_KEYPAIRBYTES) {
+        return $pair;
+    }
+    $pair = sodium_crypto_sign_keypair();
+    @file_put_contents($file, srvmgr_b64url($pair), LOCK_EX);
+    @chmod($file, 0600);
+    return $pair;
+}
+
+/** This app's public signing key (base64url), or '' if sodium is unavailable. */
+function srvmgr_app_pub(): string
+{
+    $pair = srvmgr_app_keypair();
+    return $pair ? srvmgr_b64url(sodium_crypto_sign_publickey($pair)) : '';
+}
+
+/** Sign a payload array with this app's key; returns a compact token or ''. */
+function srvmgr_sign_payload(array $payload): string
+{
+    $pair = srvmgr_app_keypair();
+    if (!$pair) {
+        return '';
+    }
+    $payload['iat'] = $payload['iat'] ?? time();
+    $json = json_encode($payload, JSON_UNESCAPED_SLASHES);
+    $sig  = sodium_crypto_sign_detached($json, sodium_crypto_sign_secretkey($pair));
+    return srvmgr_b64url($json) . '.' . srvmgr_b64url($sig);
 }
 //
 //    The secret MUST equal managed_apps.helper_token in Server Manager. You
@@ -161,7 +310,9 @@ function srvmgr_challenge(): ?string
 
 /**
  * Pairing handshake (pre-auth). The manager POSTs the challenge it read from
- * this page; if it matches an unused, unexpired code we hand over the secret
+ * this page. If this app was unlocked with a manager-SIGNED token, the manager
+ * must ALSO present a matching signed `claim` — so a stranger who merely saw
+ * the challenge cannot steal the secret. On success we hand over the secret
  * exactly once and permanently disable pairing.
  */
 function srvmgr_handle_enroll(array $req): void
@@ -180,6 +331,23 @@ function srvmgr_handle_enroll(array $req): void
         reply(['error' => 'challenge expired'], false, 403);
     }
 
+    // If unlocked via a signed manager token, demand a matching signed claim.
+    $unlockJti = (string) ($doc['unlock_jti'] ?? '');
+    if ($unlockJti !== '') {
+        $pub   = srvmgr_manager_pubkey();
+        $claim = ($req['claim'] ?? '') !== '' && $pub !== ''
+            ? srvmgr_verify_token((string) $req['claim'], $pub)
+            : null;
+        $okClaim = is_array($claim)
+            && ($claim['typ'] ?? '') === 'claim'
+            && hash_equals($unlockJti, (string) ($claim['jti'] ?? ''))
+            && hash_equals($active, (string) ($claim['challenge'] ?? ''))
+            && (int) ($claim['exp'] ?? 0) >= time();
+        if (!$okClaim) {
+            reply(['error' => 'a valid manager-signed claim is required'], false, 403);
+        }
+    }
+
     // Consume the challenge + lock pairing before returning the secret.
     $doc['used']      = true;
     $doc['paired_at'] = date('c');
@@ -193,17 +361,31 @@ function srvmgr_handle_enroll(array $req): void
     ]);
 }
 
-/** True if this helper can verify a manager-issued unlock code at all. */
+/** Record which manager unlock-token (jti) unlocked this app, for binding. */
+function srvmgr_record_unlock(string $jti): void
+{
+    $doc = srvmgr_pairing_read();
+    $doc['unlock_jti']  = $jti;
+    $doc['unlocked_at'] = time();
+    srvmgr_pairing_write($doc);
+}
+
+/** True if this helper can verify a manager-issued unlock token at all. */
 function srvmgr_gate_configured(): bool
 {
-    return srvmgr_manager_url() !== '' || srvmgr_pair_code() !== '';
+    return srvmgr_manager_url() !== '' || srvmgr_pair_code() !== '' || srvmgr_manager_pubkey() !== '';
 }
 
 /**
- * Verify the unlock code the operator presents. Preferred: ask the configured
- * manager (SRVMGR_MANAGER_URL) whether the code it issued is still valid. This
- * proves the operator is acting from the manager before we reveal anything.
- * Fallback: a static shared PIN in SRVMGR_PAIR_CODE.
+ * Verify the unlock token/code the operator presents.
+ *
+ * Preferred: the operator's value is a manager-SIGNED unlock token. We verify
+ * its Ed25519 signature against the manager public key entirely offline — it
+ * cannot be forged, spoofed by a MITM, or replayed (it carries a jti + expiry).
+ * On success we remember its jti so pairing can be bound to it end-to-end.
+ *
+ * Fallbacks (older setups): ask the manager online (POST /api/pair/verify), or
+ * compare a static shared PIN.
  *
  * @return array{ok:bool, reason:?string}
  */
@@ -211,9 +393,27 @@ function srvmgr_verify_manager_code(string $code): array
 {
     $code = trim($code);
     if ($code === '') {
-        return ['ok' => false, 'reason' => 'Enter the unlock code from your manager.'];
+        return ['ok' => false, 'reason' => 'Enter the unlock token from your manager.'];
     }
 
+    // Preferred: offline verification of a manager-signed token.
+    if (str_contains($code, '.')) {
+        $pub = srvmgr_manager_pubkey();
+        if ($pub === '') {
+            return ['ok' => false, 'reason' => 'Cannot verify this token: the manager public key is not configured on this app.'];
+        }
+        $doc = srvmgr_verify_token($code, $pub);
+        if (is_array($doc) && ($doc['typ'] ?? '') === 'unlock' && !empty($doc['jti'])) {
+            if ((int) ($doc['exp'] ?? 0) < time()) {
+                return ['ok' => false, 'reason' => 'This unlock token has expired. Generate a new one in your manager.'];
+            }
+            srvmgr_record_unlock((string) $doc['jti']);
+            return ['ok' => true, 'reason' => null];
+        }
+        return ['ok' => false, 'reason' => 'Invalid or tampered unlock token.'];
+    }
+
+    // Fallback: online verification against the manager.
     $manager = srvmgr_manager_url();
     if ($manager !== '') {
         $ch = curl_init(rtrim($manager, '/') . '/api/pair/verify');
@@ -234,12 +434,19 @@ function srvmgr_verify_manager_code(string $code): array
         $json = json_decode((string) $resp, true);
         $ok = $http >= 200 && $http < 300 && is_array($json)
             && (!empty($json['ok']) || !empty($json['data']['valid']));
+        if ($ok) {
+            srvmgr_record_unlock('');
+        }
         return ['ok' => $ok, 'reason' => $ok ? null : 'Invalid or expired unlock code.'];
     }
 
+    // Fallback: static shared PIN.
     $static = srvmgr_pair_code();
     if ($static !== '') {
         $ok = hash_equals($static, $code);
+        if ($ok) {
+            srvmgr_record_unlock('');
+        }
         return ['ok' => $ok, 'reason' => $ok ? null : 'Invalid unlock code.'];
     }
 
@@ -253,45 +460,72 @@ function srvmgr_page(string $title, string $body): string
         . '<style>body{font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:8vh auto;padding:0 20px;color:#e6e6e6;background:#111}'
         . '.key{font:600 22px/1.4 ui-monospace,monospace;letter-spacing:2px;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:14px 18px;margin:8px 0;word-break:break-all;color:#7dd3fc}'
         . 'input{font:600 18px ui-monospace,monospace;letter-spacing:2px;width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:12px 14px;color:#e6e6e6;margin:8px 0}'
+        . 'textarea{font:600 14px ui-monospace,monospace;letter-spacing:1px;width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:12px 14px;color:#e6e6e6;margin:8px 0;resize:vertical;word-break:break-all}'
         . 'button{font:600 15px system-ui;background:#2563eb;color:#fff;border:0;border-radius:8px;padding:12px 20px;cursor:pointer}'
         . 'code{background:#222;padding:2px 6px;border-radius:4px}.muted{color:#9aa0a6}.ok{color:#4ade80}.err{color:#f87171}h1{margin-bottom:4px}</style>'
         . $body;
 }
 
-/** The locked gate: prompt for the manager-issued unlock code. */
+/** The locked gate: prompt for the manager-issued unlock token. */
 function srvmgr_gate_html(string $host, ?string $error): string
 {
     $err = $error ? '<p class=err>' . htmlspecialchars($error, ENT_QUOTES) . '</p>' : '';
     return srvmgr_page("Unlock {$host}",
         "<h1>🔒 {$host}</h1>"
         . '<p class=muted>This app is locked. To pair it, open Server Manager, choose '
-        . '<b>Apps → Pair app</b>, generate an <b>unlock code</b>, and enter it here.</p>'
+        . '<b>Apps → Pair app</b>, generate an <b>unlock token</b>, and paste it here.</p>'
         . $err
         . '<form method=post autocomplete=off>'
-        . '<label class=muted for=manager_code>Unlock code from your manager</label>'
-        . '<input id=manager_code name=manager_code placeholder="XXXX-XXXX-XXXX-XXXX" autofocus>'
+        . '<label class=muted for=manager_code>Unlock token from your manager</label>'
+        . '<textarea id=manager_code name=manager_code rows=3 placeholder="paste the signed unlock token" autofocus></textarea>'
         . '<button type=submit>Unlock</button>'
         . '</form>');
 }
 
-/** The unlocked view: reveal this app's enrollment + challenge keys. */
+/** The unlocked view: reveal this app's single signed enrollment payload. */
 function srvmgr_unlocked_html(string $host): string
 {
-    $code   = htmlspecialchars((string) srvmgr_challenge(), ENT_QUOTES);
+    $challenge = (string) srvmgr_challenge();
     $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
     $self   = $scheme . '://' . ($_SERVER['HTTP_HOST'] ?? '') . ($_SERVER['SCRIPT_NAME'] ?? '/srvmgr/helper.php');
-    $enroll = htmlspecialchars(rtrim(strtr(base64_encode((string) json_encode([
-        'u' => $self,
-        'c' => (string) srvmgr_challenge(),
-        'h' => $_SERVER['HTTP_HOST'] ?? '',
-    ])), '+/', '-_'), '='), ENT_QUOTES);
+    $doc    = srvmgr_pairing_read();
+    $jti    = (string) ($doc['unlock_jti'] ?? '');
+    $appPub = srvmgr_app_pub();
+
+    // Preferred: a single, self-signed v2 payload carrying everything the
+    // manager needs — URL, host, challenge, this app's public key, and the jti
+    // of the unlock token that opened this gate. The operator copies just this.
+    if ($appPub !== '') {
+        $enroll = srvmgr_sign_payload([
+            'v'         => 2,
+            'typ'       => 'enroll',
+            'url'       => $self,
+            'host'      => $_SERVER['HTTP_HOST'] ?? '',
+            'challenge' => $challenge,
+            'jti'       => $jti,
+            'app_pub'   => $appPub,
+            'exp'       => time() + 900,
+        ]);
+    } else {
+        // Legacy unsigned combined key {u,c,h} (no libsodium available).
+        $enroll = srvmgr_b64url((string) json_encode([
+            'u' => $self,
+            'c' => $challenge,
+            'h' => $_SERVER['HTTP_HOST'] ?? '',
+        ]));
+    }
+
+    $enrollEsc = htmlspecialchars($enroll, ENT_QUOTES);
+    $codeEsc   = htmlspecialchars($challenge, ENT_QUOTES);
 
     return srvmgr_page("Pair {$host}",
         "<h1>🔓 {$host} unlocked</h1>"
-        . '<p class=ok>Verified. Paste the enrollment key below back into Server Manager to finish pairing.</p>'
-        . '<h3>Enrollment key <span class=muted>(paste the whole thing for auto-fill)</span></h3><div class=key>' . $enroll . '</div>'
-        . '<h3>Challenge key <span class=muted>(if entering fields manually)</span></h3><div class=key>' . $code . '</div>'
-        . '<p class=muted>These expire in 15 minutes and work only once. Reload to lock again.</p>');
+        . '<p class=ok>Verified. Copy the <b>one</b> enrollment payload below and paste it into Server Manager '
+        . '(<b>Apps → Pair app</b>) to finish. It contains the URL, challenge and signing key — nothing else to type.</p>'
+        . '<h3>Enrollment payload <span class=muted>(copy the whole block)</span></h3><div class=key>' . $enrollEsc . '</div>'
+        . '<h3 class=muted>Challenge <span class=muted>(reference only)</span></h3><div class=key>' . $codeEsc . '</div>'
+        . '<p class=muted>This payload is single-use, expires in 15 minutes, and is cryptographically bound to your '
+        . 'manager\'s unlock token. Reload to lock again.</p>');
 }
 
 /**
@@ -317,9 +551,10 @@ function srvmgr_render_pairing_page(?string $submittedCode = null): void
     if (!srvmgr_gate_configured()) {
         echo srvmgr_page("Locked · {$host}",
             "<h1>🔒 {$host}</h1>"
-            . '<p class=err>Pairing is locked: this helper cannot verify a manager unlock code.</p>'
-            . '<p class=muted>Set <code>SRVMGR_MANAGER_URL</code> (recommended) so this page can verify codes '
-            . 'issued by your Server Manager, or set a static <code>SRVMGR_PAIR_CODE</code>. Then reload.</p>');
+            . '<p class=err>Pairing is locked: this helper cannot verify a manager unlock token.</p>'
+            . '<p class=muted>Download this helper pre-filled from your manager\'s <code>/integrate/helper.php</code> '
+            . '(it bakes in the manager URL + public key), or set <code>SRVMGR_MANAGER_URL</code> / '
+            . '<code>SRVMGR_MANAGER_PUBKEY</code>. A static <code>SRVMGR_PAIR_CODE</code> also works. Then reload.</p>');
         return;
     }
 

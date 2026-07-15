@@ -103,35 +103,59 @@ Apps may define custom actions; unknown actions MUST return HTTP 400 with
 
 Instead of an operator inventing a `helper_token` and pasting it on both sides,
 the helper generates its own secret and hands it to Server Manager through a
-gated challenge — the secret is never seen or typed, and an unpaired helper
-never shows its challenge to a stranger who simply hits the URL.
+gated, **cryptographically signed** challenge — the secret is never seen or
+typed, an unpaired helper never shows anything to a stranger, and every step is
+bound by Ed25519 signatures plus a single-use token id (`jti`).
+
+Trust anchor: the manager owns an Ed25519 keypair. Its **public** key is baked
+into helpers downloaded from `/integrate/helper.php` (and served at
+`GET <manager>/api/pair/pubkey`), so the helper can verify manager tokens
+**offline** — nothing to intercept or spoof.
 
 Flow:
-1. On first run the helper generates a 256-bit secret from entropy and stores it
-   OUTSIDE the web root (env `SRVMGR_HELPER_TOKEN` overrides; `SRVMGR_STATE_DIR`
-   sets the storage dir).
+1. On first run the helper generates a 256-bit secret AND its own Ed25519
+   keypair, stored OUTSIDE the web root (env `SRVMGR_HELPER_TOKEN` overrides the
+   secret; `SRVMGR_STATE_DIR` sets the storage dir).
 2. The helper page is **locked**. In Server Manager → **Apps → Pair app** the
-   operator generates a short-lived **unlock code**.
-3. The operator enters that unlock code on the app's helper page. The helper
-   verifies it against the manager (`POST <manager>/api/pair/verify`, a public
-   valid/invalid check) before revealing anything. Configure the helper with
-   `SRVMGR_MANAGER_URL` (or a static `SRVMGR_PAIR_CODE`) to enable the gate.
-4. Once unlocked, the helper shows a single-use **challenge key** (valid 15 min)
-   plus a combined base64url **enrollment key** (encodes helper URL + challenge).
-5. The operator pastes that key back into Server Manager, which POSTs
-   `{ "action": "enroll", "challenge": "…" }` to the helper over HTTPS (this call
-   is intentionally **unsigned** — the manager does not yet hold the secret; the
-   challenge is the proof). The helper returns `{ "secret": "…" }` exactly once,
-   records `paired_at`, and permanently disables pairing.
-6. Server Manager stores that secret as `helper_token`; all later calls are
-   signed as normal.
+   operator generates a short-lived, manager-**signed unlock token** (carries a
+   unique `jti` + expiry).
+3. The operator pastes that token on the app's helper page. The helper verifies
+   the manager's signature against the pinned public key (offline) — proving the
+   token came from this manager and is unexpired — then records the `jti`.
+   Configure via `SRVMGR_MANAGER_URL` + `SRVMGR_MANAGER_PUBKEY` (baked in on
+   download), or a static `SRVMGR_PAIR_CODE` for the legacy online flow.
+4. Once unlocked, the helper shows **one** self-signed **enrollment payload**
+   (valid 15 min, single use) that bundles everything — copy just this:
+
+   ```
+   token = base64url(json).base64url(ed25519_sig_by_app)
+   json  = { "v":2, "typ":"enroll",
+             "url":"https://<app>/srvmgr/helper.php",
+             "host":"<app-host>",
+             "challenge":"<one-time challenge>",
+             "jti":"<manager unlock token id>",
+             "app_pub":"<app ed25519 public key, base64url>",
+             "iat":<unix>, "exp":<unix> }
+   ```
+
+5. The operator pastes that ONE payload into Server Manager, which verifies its
+   signature + that the `jti` matches a live token it issued, then POSTs
+   `{ "action":"enroll", "challenge":"…", "jti":"…", "claim":"<manager-signed>" }`
+   to the helper over HTTPS. The `claim` is a manager-signed token bound to the
+   same `jti` + challenge. The helper verifies that signature before returning
+   `{ "secret": "…" }` exactly once, records `paired_at`, and disables pairing.
+6. Server Manager stores that secret as `helper_token` and consumes the `jti`
+   (single use); all later calls are signed as normal.
 
 Security properties: the secret never appears in a browser or gets typed; the
-pairing page stays locked until the operator proves possession of a
-manager-issued unlock code; the challenge is short-lived + single-use; the
-exchange is server-to-server over HTTPS; and pairing self-disables after the
-first success. To re-pair (e.g. when moving managers) delete `pairing.json` in
-the state dir.
+pairing page stays locked until the operator presents an **unforgeable,
+manager-signed** unlock token; the enrollment payload is **tamper-evident**
+(app-signed) and **bound** to that token via the `jti`; the secret is only
+released to a caller holding a valid **manager-signed claim** for that same
+`jti` + challenge (so glimpsing the challenge is not enough to steal it); the
+challenge + token are short-lived and single-use; the exchange is
+server-to-server over HTTPS; and pairing self-disables after the first success.
+To re-pair (e.g. when moving managers) delete `pairing.json` in the state dir.
 
 ## Optional: lightweight GET health URL
 

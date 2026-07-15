@@ -34,6 +34,23 @@ if ($base !== '' && filter_var($base, FILTER_VALIDATE_URL)) {
     );
 }
 
+// Bake this manager's Ed25519 public signing key into the helper so it can
+// verify unlock/claim tokens OFFLINE — the strongest, un-interceptable path.
+try {
+    $pubkey = \App\PairManager::pubKeyB64();
+    if ($pubkey !== '') {
+        $src = preg_replace(
+            "/const SRVMGR_MANAGER_PUBKEY_DEFAULT = '';/",
+            "const SRVMGR_MANAGER_PUBKEY_DEFAULT = '" . addslashes($pubkey) . "';",
+            $src,
+            1
+        );
+    }
+} catch (\Throwable) {
+    // libsodium unavailable — leave the pubkey blank; the helper falls back to
+    // fetching it from /api/pair/pubkey or the online verify flow.
+}
+
 header('Content-Type: text/plain; charset=utf-8');
 header('Content-Disposition: attachment; filename="helper.php"');
 echo $src;

@@ -190,26 +190,51 @@ final class AppManager
      */
     public static function enroll(array $input): array
     {
+        // Primary path: a single signed enrollment payload the operator copied
+        // from the app's helper page. It carries EVERYTHING needed to pair —
+        // helper URL, one-time challenge, host, the app's own public key, and
+        // the jti of the unlock token it was unlocked with — and is self-signed
+        // by the app so any tampering is detected. See docs/APP_HELPER spec.
+        $payloadStr = trim((string) ($input['enroll_payload'] ?? $input['enroll_key'] ?? ''));
+
         $challenge  = trim((string) ($input['challenge'] ?? ''));
         $helperUrl  = trim((string) ($input['helper_url'] ?? ''));
         $domain     = trim((string) ($input['domain'] ?? ''));
         $helperPath = trim((string) ($input['helper_path'] ?? 'srvmgr/helper.php'));
+        $jti        = '';
 
-        // Combined enrollment key auto-fills url + challenge (+ host).
-        if (!empty($input['enroll_key'])) {
-            $decoded = self::decodeEnrollKey((string) $input['enroll_key']);
+        $signed = $payloadStr !== '' ? self::parseEnrollPayload($payloadStr) : null;
+        if ($signed !== null) {
+            // Verified, tamper-proof v2 payload.
+            $helperUrl = $helperUrl !== '' ? $helperUrl : trim((string) ($signed['url'] ?? ''));
+            $challenge = $challenge !== '' ? $challenge : trim((string) ($signed['challenge'] ?? ''));
+            $domain    = $domain !== ''    ? $domain    : trim((string) ($signed['host'] ?? ''));
+            $jti       = trim((string) ($signed['jti'] ?? ''));
+            if (!empty($signed['exp']) && (int) $signed['exp'] < time()) {
+                return ['ok' => false, 'error' => 'enrollment payload has expired — reload the app helper page'];
+            }
+        } elseif ($payloadStr !== '') {
+            // Legacy combined key {u,c,h} (unsigned) — still accepted so older
+            // helpers keep working, but without the cryptographic binding.
+            $decoded = self::decodeEnrollKey($payloadStr);
             if ($decoded) {
                 $helperUrl = $helperUrl !== '' ? $helperUrl : trim((string) ($decoded['u'] ?? ''));
                 $challenge = $challenge !== '' ? $challenge : trim((string) ($decoded['c'] ?? ''));
                 $domain    = $domain !== ''    ? $domain    : trim((string) ($decoded['h'] ?? ''));
             } elseif ($challenge === '') {
-                // Not a combined key — treat the pasted value as the challenge.
-                $challenge = trim((string) $input['enroll_key']);
+                $challenge = $payloadStr; // treat the pasted value as the challenge
             }
         }
 
         if ($challenge === '') {
-            return ['ok' => false, 'error' => 'challenge / enrollment key required'];
+            return ['ok' => false, 'error' => 'enrollment payload or challenge required'];
+        }
+
+        // If the payload carried a signed jti, it must match an unlock token
+        // THIS manager issued and has not already redeemed — binding the app we
+        // are enrolling to a token we handed the operator (and no one else).
+        if ($jti !== '' && PairManager::liveToken($jti) === null) {
+            return ['ok' => false, 'error' => 'unlock token is unknown, already used, or expired'];
         }
 
         // Resolve the helper endpoint.
@@ -223,8 +248,11 @@ final class AppManager
             return ['ok' => false, 'error' => 'helper URL must be http(s)'];
         }
 
-        // Claim the secret from the helper using the challenge.
-        $claim = self::claimSecret($base, $challenge);
+        // Claim the secret from the helper using the challenge, sending a
+        // manager-SIGNED claim token bound to this jti + challenge. The helper
+        // verifies that signature before releasing the secret, so an attacker
+        // who merely glimpsed the challenge cannot steal it.
+        $claim = self::claimSecret($base, $challenge, $jti);
         if (empty($claim['ok'])) {
             return $claim;
         }
@@ -258,7 +286,12 @@ final class AppManager
             return $reg;
         }
 
-        AuditLogger::log('app.enroll', $domain, ['id' => $reg['id'] ?? null]);
+        // Redeem the unlock token exactly once, now that pairing succeeded.
+        if ($jti !== '') {
+            PairManager::consumeToken($jti);
+        }
+
+        AuditLogger::log('app.enroll', $domain, ['id' => $reg['id'] ?? null, 'jti' => $jti ?: null, 'signed' => $signed !== null]);
         return ['ok' => true, 'id' => $reg['id'] ?? null, 'app' => $reg['app'] ?? null, 'paired' => true];
     }
 
@@ -498,14 +531,28 @@ final class AppManager
 
     /**
      * Present a challenge to a helper's unauthenticated `enroll` action and
-     * return the shared secret it hands back. This is the only helper call
-     * made WITHOUT a signature — the challenge itself is the proof.
+     * return the shared secret it hands back. When a jti is supplied we also
+     * send a manager-SIGNED claim token bound to that jti + challenge; the
+     * helper verifies it against the manager public key before releasing the
+     * secret. This is the only helper call made WITHOUT the shared secret — the
+     * signed claim (or, for legacy helpers, the challenge alone) is the proof.
      *
      * @return array{ok:bool, secret?:string, error?:string}
      */
-    private static function claimSecret(string $base, string $challenge): array
+    private static function claimSecret(string $base, string $challenge, string $jti = ''): array
     {
-        $body = json_encode(['action' => 'enroll', 'challenge' => $challenge], JSON_UNESCAPED_SLASHES);
+        $payload = ['action' => 'enroll', 'challenge' => $challenge];
+        if ($jti !== '') {
+            $payload['jti']   = $jti;
+            $payload['claim'] = PairCrypto::sign([
+                'v'         => 2,
+                'typ'       => 'claim',
+                'jti'       => $jti,
+                'challenge' => $challenge,
+                'exp'       => time() + 120,
+            ]);
+        }
+        $body = json_encode($payload, JSON_UNESCAPED_SLASHES);
 
         $ch = curl_init($base);
         curl_setopt_array($ch, [
@@ -537,6 +584,24 @@ final class AppManager
             ? (string) ($json['error'] ?? $json['data']['error'] ?? "HTTP {$code}")
             : "HTTP {$code}";
         return ['ok' => false, 'error' => "pairing rejected: {$err}"];
+    }
+
+    /**
+     * Verify + decode a v2 signed enrollment payload (base64url(json).sig).
+     * The payload is self-signed by the app's own key (embedded as `app_pub`),
+     * so we can prove it was not tampered with in transit. Returns null if it
+     * is not a valid, correctly-typed enrollment payload.
+     */
+    private static function parseEnrollPayload(string $token): ?array
+    {
+        if (!str_contains($token, '.')) {
+            return null;
+        }
+        $doc = PairCrypto::verifySelfSigned($token, 'app_pub');
+        if (!is_array($doc) || ($doc['typ'] ?? '') !== 'enroll' || empty($doc['challenge'])) {
+            return null;
+        }
+        return $doc;
     }
 
     /** Decode a combined enrollment key (base64url JSON). Returns null if not one. */

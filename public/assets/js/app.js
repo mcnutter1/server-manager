@@ -681,27 +681,29 @@
                     '<input type="hidden" name="slug"></div>' +
                     '<div class="card" style="margin:0 0 14px;padding:12px 14px">' +
                     '<strong>Step 2 — unlock the app</strong>' +
-                    '<p class="muted" style="margin:6px 0">Generate a one-time unlock code, then enter it on the app\'s ' +
+                    '<p class="muted" style="margin:6px 0">Generate a one-time, signed unlock token, then paste it on the app\'s ' +
                     'helper page (<span class="mono">https://&lt;app&gt;/srvmgr/helper.php</span>). ' +
-                    'That proves you\'re acting from this manager and reveals the app\'s enrollment key.</p>' +
-                    '<button class="btn small" id="genCodeBtn" type="button">Generate unlock code</button>' +
+                    'The app verifies this manager\'s signature offline, then reveals a single enrollment payload.</p>' +
+                    '<button class="btn small" id="genCodeBtn" type="button">Generate unlock token</button>' +
                     '<div id="unlockCodeBox" style="margin-top:8px"></div></div>' +
                     '<div class="card" style="margin:0;padding:12px 14px">' +
                     '<strong>Step 3 — finish pairing</strong>' +
-                    '<p class="muted" style="margin:6px 0">Paste the enrollment key the app showed after unlocking.</p>' +
-                    '<div class="field"><label>Enrollment key <span class="muted">(auto-fills URL + challenge)</span></label>' +
-                    '<input name="enroll_key" placeholder="base64 enrollment key from the helper page"></div>' +
-                    '<div class="field"><label>…or Helper URL + Challenge</label>' +
+                    '<p class="muted" style="margin:6px 0">Paste the single enrollment payload the app showed after unlocking. ' +
+                    'It carries the URL, challenge and signing key — nothing else to type.</p>' +
+                    '<div class="field"><label>Enrollment payload <span class="muted">(the whole block from the app)</span></label>' +
+                    '<textarea name="enroll_payload" rows="3" placeholder="signed enrollment payload from the helper page"></textarea></div>' +
+                    '<details style="margin:6px 0 10px"><summary class="muted" style="cursor:pointer">Enter fields manually instead</summary>' +
+                    '<div class="field" style="margin-top:8px"><label>Helper URL</label>' +
                     '<input name="helper_url" placeholder="https://app.mcnutt.cloud/srvmgr/helper.php"></div>' +
-                    '<div class="field"><label>Challenge key</label><input name="challenge" placeholder="XXXX-XXXX-XXXX-XXXX"></div>' +
+                    '<div class="field"><label>Challenge key</label><input name="challenge" placeholder="XXXX-XXXX-XXXX-XXXX"></div></details>' +
                     '<div class="field"><label>Name</label><input name="name" placeholder="My app"></div>' +
                     '<div class="field"><label>Path</label><input name="path" value="/var/www/"></div>' +
                     '<div class="field"><label>Health URL <span class="muted">(optional)</span></label>' +
                     '<input name="health_url" placeholder="https://app.mcnutt.cloud/health"></div></div>',
                     (d, close) => {
-                        if (!d.enroll_key && !d.challenge) { UI.toast('warn', 'Enrollment or challenge key required'); return; }
+                        if (!d.enroll_payload && !d.challenge) { UI.toast('warn', 'Enrollment payload or challenge required'); return; }
                         if (!d.path) { UI.toast('warn', 'Path required'); return; }
-                        UI.toast('info', 'Pairing…', 'Contacting the app helper');
+                        UI.toast('info', 'Pairing…', 'Verifying payload and contacting the app helper');
                         API.post('/apps/enroll', d).then((res) => {
                             if (res.data.ok) { UI.toast('success', 'Paired', d.name || res.data.app && res.data.app.slug || 'app'); close(); Views.apps.load(); $('#discoverResults').empty(); }
                             else UI.toast('error', 'Pairing failed', res.data.error);
@@ -721,13 +723,15 @@
                 $('#genCodeBtn').on('click', function () {
                     const $btn = $(this).prop('disabled', true).text('Generating…');
                     API.post('/apps/pair/code', {}).then((res) => {
-                        $btn.prop('disabled', false).text('Regenerate unlock code');
-                        if (res.data && res.data.code) {
+                        $btn.prop('disabled', false).text('Regenerate unlock token');
+                        const token = res.data && (res.data.token || res.data.code);
+                        if (token) {
                             const mins = Math.round((res.data.expires_in || 900) / 60);
-                            $('#unlockCodeBox').html('<div class="mono" style="font-size:20px;letter-spacing:2px;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:12px 14px;color:#7dd3fc">' +
-                                H.esc(res.data.code) + '</div><span class="muted">Enter this on the app\'s helper page — valid for ' + mins + ' min.</span>');
+                            $('#unlockCodeBox').html('<textarea readonly rows="3" onclick="this.select()" ' +
+                                'style="font:600 13px ui-monospace,monospace;width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:12px 14px;color:#7dd3fc;word-break:break-all;resize:vertical">' +
+                                H.esc(token) + '</textarea><span class="muted">Paste this on the app\'s helper page — valid for ' + mins + ' min, single use.</span>');
                         } else {
-                            UI.toast('error', 'Could not issue code', (res.data && res.data.error) || '');
+                            UI.toast('error', 'Could not issue token', (res.data && res.data.error) || '');
                         }
                     });
                 });

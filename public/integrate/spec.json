@@ -150,11 +150,15 @@
     "enroll": {
       "required": false,
       "unauthenticated": true,
-      "description": "One-time pairing handshake. Called by Server Manager WITHOUT a signature (the manager does not yet hold the secret). The helper verifies the challenge it previously displayed on its GET page and returns the shared secret exactly once, then permanently disables pairing.",
+      "description": "One-time pairing handshake. Called by Server Manager WITHOUT the shared secret (it does not hold it yet). The helper verifies the challenge it displayed AND, when it was unlocked with a signed manager token, a matching manager-signed claim, then returns the shared secret exactly once and permanently disables pairing.",
       "params": {
         "type": "object",
         "required": ["challenge"],
-        "properties": { "challenge": { "type": "string", "description": "single-use key from the helper's pairing page" } }
+        "properties": {
+          "challenge": { "type": "string", "description": "single-use key from the helper's pairing page (also embedded in the enrollment payload)" },
+          "jti": { "type": "string", "description": "the manager unlock token id echoed by the app's enrollment payload" },
+          "claim": { "type": "string", "description": "base64url(json).ed25519_sig — a manager-signed claim token {v:2,typ:'claim',jti,challenge,exp}; REQUIRED when the app was unlocked with a signed token" }
+        }
       },
       "data": {
         "type": "object",
@@ -173,27 +177,52 @@
     }
   },
   "pairing": {
-    "summary": "Gated, zero-touch enrollment so no shared secret is ever copied by a human and an unpaired helper never leaks its challenge to a stranger.",
+    "summary": "Gated, zero-touch, cryptographically air-tight enrollment. No shared secret is ever copied by a human, an unpaired helper never leaks anything to a stranger, and every step is bound by Ed25519 signatures + a single-use token id (jti).",
+    "trust_anchor": "The manager owns an Ed25519 keypair. Its PUBLIC key is baked into helpers downloaded from /integrate/helper.php (and served at GET /api/pair/pubkey), so a helper can verify manager tokens OFFLINE — no interceptable callback.",
     "flow": [
-      "Helper auto-generates a 256-bit secret on first run and stores it outside the web root.",
-      "The helper's pairing page is LOCKED. In Server Manager \u2192 Apps \u2192 Pair app the operator generates a short-lived unlock code.",
-      "The operator enters that unlock code on the app's helper page. The helper verifies it against the manager (POST /api/pair/verify) before revealing anything.",
-      "Once unlocked, the helper shows a single-use challenge key (and a combined base64url enrollment key).",
-      "The operator pastes that key back into Server Manager, which POSTs {action:'enroll', challenge} to the helper over HTTPS and receives the secret once.",
-      "The manager registers the app with that secret as helper_token; the helper disables further pairing."
+      "Helper auto-generates a 256-bit secret AND its own Ed25519 keypair on first run, stored outside the web root.",
+      "The helper's pairing page is LOCKED. In Server Manager \u2192 Apps \u2192 Pair app the operator generates a short-lived, manager-SIGNED unlock token (carries a unique jti + expiry).",
+      "The operator pastes that token on the app's helper page. The helper verifies the manager's signature against the pinned public key (offline) — proving it came from this manager and is unexpired/unused — then records the jti.",
+      "Once unlocked, the helper shows ONE self-signed enrollment payload (see enrollment_payload) that bundles the URL, challenge, host, the app's public key and the jti. The operator copies just this and pastes it into Server Manager.",
+      "The manager verifies the payload signature, checks the jti matches a live token it issued, then POSTs {action:'enroll', challenge, jti, claim} to the helper over HTTPS. The claim is a manager-signed token bound to the same jti + challenge.",
+      "The helper verifies the manager-signed claim before handing over the secret once, then disables further pairing. The manager stores the secret as helper_token and consumes the jti (single use)."
     ],
+    "enrollment_payload": {
+      "description": "The SINGLE required value the operator copies from the app's unlocked helper page into the manager. Self-signed by the app so tampering is detected.",
+      "format": "base64url(json_utf8) + '.' + base64url(ed25519_signature)",
+      "signed_by": "the app's own Ed25519 key (public half is included as app_pub for trust-on-first-use)",
+      "json": {
+        "v": 2,
+        "typ": "enroll",
+        "url": "https://<app>/srvmgr/helper.php (full helper URL)",
+        "host": "<app host>",
+        "challenge": "single-use challenge key",
+        "jti": "id of the manager unlock token that opened the gate (binds app\u2194token)",
+        "app_pub": "the app's Ed25519 public key, base64url",
+        "iat": "unix issued-at",
+        "exp": "unix expiry (~15 min)"
+      }
+    },
+    "pubkey_endpoint": {
+      "method": "GET",
+      "url": "<manager>/api/pair/pubkey",
+      "auth": "none (public); public keys are safe to expose",
+      "response": { "ok": true, "data": { "pubkey": "base64url ed25519 public key", "alg": "ed25519" } }
+    },
     "verify_endpoint": {
       "method": "POST",
       "url": "<manager>/api/pair/verify",
       "auth": "none (public); returns only valid/invalid",
-      "request": { "code": "the unlock code the operator was shown in the manager" },
+      "note": "Legacy/online fallback. Modern helpers verify the signed token offline and do not call this.",
+      "request": { "code": "the unlock token (or legacy PIN) the operator was shown in the manager" },
       "response": { "ok": "boolean", "data": { "valid": "boolean" } }
     },
     "env": {
-      "SRVMGR_MANAGER_URL": "manager base URL; lets the helper verify unlock codes (enables the gate)",
-      "SRVMGR_PAIR_CODE": "optional static unlock PIN when no manager URL is set",
+      "SRVMGR_MANAGER_URL": "manager base URL; used to fetch/pin the public key and for the online verify fallback",
+      "SRVMGR_MANAGER_PUBKEY": "manager Ed25519 public key (base64url); baked in on download, enables OFFLINE token verification",
+      "SRVMGR_PAIR_CODE": "optional static unlock PIN for the legacy online flow when no signing key is available",
       "SRVMGR_HELPER_TOKEN": "optional: set the secret explicitly instead of auto-generating",
-      "SRVMGR_STATE_DIR": "optional: persistent, non-web-served dir for the secret + pairing state"
+      "SRVMGR_STATE_DIR": "optional: persistent, non-web-served dir for the secret, app keypair + pairing state"
     },
     "re_pair": "Delete pairing.json in the state dir to re-arm pairing (e.g. when moving managers)."
   },

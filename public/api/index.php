@@ -60,7 +60,7 @@ $input = array_merge($_GET, $body);
 // the pairing-code verification endpoint (called server-to-server by a
 // downstream app's helper, which has no manager credentials yet).
 // ---------------------------------------------------------------------
-$publicPaths = ['/ping', '/pair/verify'];
+$publicPaths = ['/ping', '/pair/verify', '/pair/pubkey'];
 if (!in_array($path, $publicPaths, true)) {
     Auth::authenticateApi();
 }
@@ -228,17 +228,24 @@ $post('/apps/enroll', static function () use ($input) {
     Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
 });
 
-// Issue a short-lived unlock code to present to a downstream app's helper page.
+// Issue a short-lived, signed unlock token to present to a downstream app's
+// helper page. The helper verifies the manager signature offline.
 $post('/apps/pair/code', static function () use ($input) {
     Auth::requirePrivileged('apps');
-    Response::ok(PairManager::issueCode($input['label'] ?? null, (int) ($input['ttl'] ?? 900)));
+    Response::ok(PairManager::issueToken($input['label'] ?? null, (int) ($input['ttl'] ?? 900)));
 });
 
-// PUBLIC: a downstream helper verifies the operator-presented unlock code.
-// Returns only valid/invalid; codes are high-entropy + short-lived.
+// PUBLIC: the manager's Ed25519 public signing key, so a helper can verify
+// unlock/claim tokens offline. Public keys are safe to expose.
+$get('/pair/pubkey', static function () {
+    Response::ok(['pubkey' => PairManager::pubKeyB64(), 'alg' => 'ed25519']);
+});
+
+// PUBLIC: a downstream helper verifies the operator-presented unlock token.
+// Returns only valid/invalid; tokens are Ed25519-signed + short-lived.
 $post('/pair/verify', static function () use ($input) {
     usleep(150000); // uniform small delay to blunt brute force
-    $ok = PairManager::verifyCode((string) ($input['code'] ?? ''));
+    $ok = PairManager::verifyCode((string) ($input['code'] ?? $input['token'] ?? ''));
     Response::json(['ok' => $ok, 'data' => ['valid' => $ok]], $ok ? 200 : 403);
 });
 

@@ -115,8 +115,8 @@ Unknown:   400  { "ok": false, "error": "unknown action" }</code></pre>
       <tr><td><code>maintenance</code></td><td><code>{ on:bool }</code></td><td><code>{ maintenance:bool }</code></td></tr>
       <tr><td><code>migrate</code> <span class="pill">destructive</span></td><td><code>{ confirm:true }</code></td>
           <td><code>{ migrated:true, applied:[] }</code></td></tr>
-      <tr><td><code>enroll</code> <span class="pill">unsigned</span></td><td><code>{ challenge:"…" }</code></td>
-          <td><code>{ secret:"…" }</code> — one-time pairing handshake</td></tr>
+      <tr><td><code>enroll</code> <span class="pill">unsigned</span></td><td><code>{ challenge:"…", jti:"…", claim:"&lt;manager-signed&gt;" }</code></td>
+          <td><code>{ secret:"…" }</code> — one-time signed pairing handshake</td></tr>
     </table>
     <p><code>health.status</code> of <code>ok</code>/<code>healthy</code> shows
        <span class="ok">healthy</span>; anything else shows <b>degraded</b>.
@@ -214,17 +214,22 @@ def srvmgr_helper():
   <section>
     <h2>Register the app</h2>
     <p><b>Gated pairing (recommended):</b> skip inventing a secret. The drop-in
-       helper generates its own on first run and keeps its pairing page
-       <b>locked</b>. In Server Manager → <b>Apps → Pair app</b>, generate an
-       <b>unlock code</b> and enter it on the app's helper page; the helper
-       verifies it against the manager (<code>POST /api/pair/verify</code>) and
-       then reveals a one-time <b>enrollment key</b>. Paste that back into the
-       Pair app dialog — the manager fetches the secret over HTTPS via the
-       unsigned <code>enroll</code> call and stores it as <code>helper_token</code>.
-       Nothing is copied by hand, an unpaired helper never leaks its challenge to
-       a stranger, and pairing self-disables after the first success. Configure
-       the helper with <code>SRVMGR_MANAGER_URL</code> (or a static
-       <code>SRVMGR_PAIR_CODE</code>) to enable the gate.</p>
+       helper generates its own secret <i>and its own Ed25519 keypair</i> on
+       first run and keeps its pairing page <b>locked</b>. In Server Manager →
+       <b>Apps → Pair app</b>, generate a manager-<b>signed unlock token</b> and
+       paste it on the app's helper page; the helper verifies the manager's
+       signature <b>offline</b> against the baked-in public key (no interceptable
+       callback), then reveals <b>one signed enrollment payload</b> bundling the
+       URL, challenge and signing key. Paste that single payload back into the
+       Pair app dialog — the manager verifies it, then fetches the secret over
+       HTTPS with a <b>manager-signed claim</b> bound to the same token and
+       stores it as <code>helper_token</code>. Nothing is copied by hand, every
+       step is signed and single-use, an unpaired helper never leaks anything,
+       and pairing self-disables after the first success. Downloading the helper
+       pre-filled from <code>/integrate/helper.php</code> bakes in
+       <code>SRVMGR_MANAGER_URL</code> + <code>SRVMGR_MANAGER_PUBKEY</code>
+       automatically (a static <code>SRVMGR_PAIR_CODE</code> still works for the
+       legacy online flow).</p>
     <p>Or register manually (Applications → Register) with a matching
        <code>helper_token</code>:</p>
     <pre><code># generate a strong shared secret and set it in the app's env
