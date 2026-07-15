@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Server Manager metrics collector every minute
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=10s
+Unit=srvmgr-metrics.service
+
+[Install]
+WantedBy=timers.target

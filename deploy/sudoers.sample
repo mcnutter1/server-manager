@@ -1,0 +1,14 @@
+# =====================================================================
+# Server Manager — sudoers snippet
+# Install as: /etc/sudoers.d/server-manager  (validate with `visudo -c`)
+#
+# Grants the web user permission to run ONLY runner.py as root with no
+# password. The runner itself enforces the token + action whitelist, so
+# the web tier can never run arbitrary commands.
+# =====================================================================
+
+# Adjust the web user (www-data on Ubuntu/Apache) and the absolute path.
+www-data ALL=(root) NOPASSWD: /usr/bin/python3 /var/www/server-manager/runner/runner.py
+
+# Lock it down: do not allow argument tampering to reach a different script.
+Defaults!/usr/bin/python3 !requiretty

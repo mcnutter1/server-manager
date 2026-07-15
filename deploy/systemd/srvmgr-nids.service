@@ -1,0 +1,9 @@
+# Server Manager — NIDS worker (systemd service)
+[Unit]
+Description=Server Manager NIDS worker (expire blocks + threat scan)
+After=mysql.service
+
+[Service]
+Type=oneshot
+User=www-data
+ExecStart=/usr/bin/php /var/www/server-manager/bin/nids-worker.php

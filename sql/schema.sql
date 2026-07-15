@@ -1,0 +1,226 @@
+-- =====================================================================
+-- Server Manager — MySQL schema
+-- Target: MySQL 8.x / MariaDB 10.5+ on Ubuntu
+-- =====================================================================
+SET NAMES utf8mb4;
+SET time_zone = '+00:00';
+
+CREATE DATABASE IF NOT EXISTS server_manager
+    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE server_manager;
+
+-- ---------------------------------------------------------------------
+-- Local API tokens (for machine-to-machine access to THIS platform).
+-- User auth is delegated to McNutt Cloud Auth; these are for automation.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    name          VARCHAR(120)    NOT NULL,
+    token_hash    CHAR(64)        NOT NULL,           -- sha256 of the raw token
+    scopes        JSON            NULL,               -- ["read","services","firewall","nids","apps","runner"]
+    created_by    VARCHAR(190)    NULL,
+    last_used_at  DATETIME        NULL,
+    expires_at    DATETIME        NULL,
+    revoked       TINYINT(1)      NOT NULL DEFAULT 0,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_token_hash (token_hash),
+    KEY idx_revoked (revoked)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Audit log — every privileged / mutating action lands here.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS audit_log (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    actor         VARCHAR(190)    NOT NULL,           -- identity email or "token:<name>"
+    actor_type    ENUM('user','token','system') NOT NULL DEFAULT 'user',
+    action        VARCHAR(120)    NOT NULL,           -- e.g. service.restart
+    target        VARCHAR(190)    NULL,               -- e.g. apache2, 10.0.0.5
+    params        JSON            NULL,
+    result        ENUM('success','failure','denied') NOT NULL DEFAULT 'success',
+    message       TEXT            NULL,
+    ip_address    VARCHAR(45)     NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_actor (actor),
+    KEY idx_action (action),
+    KEY idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Time-series system metrics (collected by bin/collect-metrics.php).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS metrics (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    cpu_pct       DECIMAL(5,2)    NULL,
+    mem_pct       DECIMAL(5,2)    NULL,
+    swap_pct      DECIMAL(5,2)    NULL,
+    disk_pct      DECIMAL(5,2)    NULL,
+    load1         DECIMAL(6,2)    NULL,
+    load5         DECIMAL(6,2)    NULL,
+    load15        DECIMAL(6,2)    NULL,
+    net_rx_bytes  BIGINT UNSIGNED NULL,
+    net_tx_bytes  BIGINT UNSIGNED NULL,
+    procs         INT UNSIGNED    NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Service state history (transitions captured by the monitor).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS service_events (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    service       VARCHAR(120)    NOT NULL,
+    state         VARCHAR(40)     NOT NULL,           -- active, inactive, failed, ...
+    sub_state     VARCHAR(60)     NULL,
+    detail        TEXT            NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_service (service),
+    KEY idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Managed applications registry.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS managed_apps (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    slug          VARCHAR(120)    NOT NULL,
+    name          VARCHAR(190)    NOT NULL,
+    description   TEXT            NULL,
+    path          VARCHAR(255)    NOT NULL,           -- /var/www/<app>
+    domain        VARCHAR(190)    NULL,
+    repo_url      VARCHAR(255)    NULL,
+    db_name       VARCHAR(120)    NULL,
+    db_user       VARCHAR(120)    NULL,
+    service_name  VARCHAR(120)    NULL,               -- optional systemd unit
+    health_url    VARCHAR(255)    NULL,               -- optional HTTP health check
+    -- Path (relative to app root) to a "helper" the app exposes so this
+    -- platform can interface with it in a common way. See docs/APP_HELPER.md
+    helper_path   VARCHAR(255)    NULL DEFAULT 'srvmgr/helper.php',
+    helper_token  VARCHAR(190)    NULL,
+    status        ENUM('active','disabled','maintenance','unmanaged') NOT NULL DEFAULT 'active',
+    managed       TINYINT(1)      NOT NULL DEFAULT 1, -- 0 = discovered but not adopted
+    meta          JSON            NULL,
+    last_health   VARCHAR(40)     NULL,
+    last_checked  DATETIME        NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_slug (slug),
+    UNIQUE KEY uq_path (path),
+    KEY idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- NIDS events (parsed indicators of compromise / suspicious activity).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS nids_events (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    source        VARCHAR(60)     NOT NULL,           -- auth, apache, manual, ...
+    category      VARCHAR(80)     NOT NULL,           -- ssh_bruteforce, sqli, xss, scan...
+    severity      ENUM('info','low','medium','high','critical') NOT NULL DEFAULT 'low',
+    src_ip        VARCHAR(45)     NOT NULL,
+    dst_port      INT UNSIGNED    NULL,
+    signature     VARCHAR(190)    NULL,
+    raw           TEXT            NULL,
+    count         INT UNSIGNED    NOT NULL DEFAULT 1,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_src_ip (src_ip),
+    KEY idx_category (category),
+    KEY idx_severity (severity),
+    KEY idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Blocked hosts (firewall drops managed by this platform, with timers).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS blocked_hosts (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    ip_address    VARCHAR(45)     NOT NULL,
+    reason        VARCHAR(255)    NULL,
+    source        VARCHAR(60)     NOT NULL DEFAULT 'manual', -- manual, nids, api
+    created_by    VARCHAR(190)    NULL,
+    active        TINYINT(1)      NOT NULL DEFAULT 1,
+    permanent     TINYINT(1)      NOT NULL DEFAULT 0,
+    blocked_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at    DATETIME        NULL,               -- NULL + permanent=1 => never
+    unblocked_at  DATETIME        NULL,
+    hits          INT UNSIGNED    NOT NULL DEFAULT 0, -- iptables packet counter snapshot
+    PRIMARY KEY (id),
+    KEY idx_ip (ip_address),
+    KEY idx_active (active),
+    KEY idx_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Firewall rule snapshots (for the UI + change tracking).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS firewall_snapshots (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    table_name    VARCHAR(40)     NOT NULL DEFAULT 'filter',
+    rules_json    JSON            NOT NULL,
+    rule_count    INT UNSIGNED    NOT NULL DEFAULT 0,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- CLI command execution log (Python runner bridge).
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS command_log (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    actor         VARCHAR(190)    NOT NULL,
+    command_key   VARCHAR(120)    NOT NULL,           -- whitelisted key, not raw shell
+    arguments     JSON            NULL,
+    exit_code     INT             NULL,
+    duration_ms   INT UNSIGNED    NULL,
+    stdout        MEDIUMTEXT      NULL,
+    stderr        MEDIUMTEXT      NULL,
+    ip_address    VARCHAR(45)     NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_actor (actor),
+    KEY idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Alerts raised by the platform + notification dispatch status.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS alerts (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    severity      ENUM('info','warning','critical') NOT NULL DEFAULT 'warning',
+    category      VARCHAR(80)     NOT NULL,           -- service, resource, nids, app
+    title         VARCHAR(190)    NOT NULL,
+    body          TEXT            NULL,
+    fingerprint   CHAR(40)        NULL,               -- de-dupe repeated alerts
+    notified      TINYINT(1)      NOT NULL DEFAULT 0,
+    acknowledged  TINYINT(1)      NOT NULL DEFAULT 0,
+    ack_by        VARCHAR(190)    NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_severity (severity),
+    KEY idx_ack (acknowledged),
+    KEY idx_fingerprint (fingerprint),
+    KEY idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
+-- Generic key/value settings store.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS settings (
+    skey          VARCHAR(120)    NOT NULL,
+    svalue        JSON            NULL,
+    updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (skey)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Seed a couple of defaults.
+INSERT INTO settings (skey, svalue) VALUES
+    ('schema_version', '"1.0.0"')
+ON DUPLICATE KEY UPDATE svalue = VALUES(svalue);

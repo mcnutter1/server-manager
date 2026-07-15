@@ -1,0 +1,21 @@
+# Secrets / local config
+config/config.php
+client_helper/config.php
+runner/.runner_token
+
+# Logs & runtime
+*.log
+runtime/
+tmp/
+storage/cache/*
+!storage/cache/.gitkeep
+
+# Dependencies
+vendor/
+node_modules/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

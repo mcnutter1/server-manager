@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Server Manager NIDS worker every minute
+
+[Timer]
+OnBootSec=90
+OnUnitActiveSec=60
+AccuracySec=10s
+Unit=srvmgr-nids.service
+
+[Install]
+WantedBy=timers.target

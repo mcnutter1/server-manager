@@ -1,0 +1,34 @@
+# =====================================================================
+# Server Manager — Apache virtual host
+# Enable: a2ensite server-manager && systemctl reload apache2
+# Requires: a2enmod rewrite headers ssl
+# =====================================================================
+<VirtualHost *:443>
+    ServerName manage.mcnutt.cloud
+
+    # DocumentRoot points at the public/ directory ONLY.
+    DocumentRoot /var/www/server-manager/public
+
+    <Directory /var/www/server-manager/public>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    # Never expose app/, config/, runner/, sql/, bin/, client_helper/.
+    <DirectoryMatch "/var/www/server-manager/(app|config|runner|sql|bin|client_helper|deploy|docs)">
+        Require all denied
+    </DirectoryMatch>
+
+    SSLEngine on
+    SSLCertificateFile      /etc/letsencrypt/live/manage.mcnutt.cloud/fullchain.pem
+    SSLCertificateKeyFile   /etc/letsencrypt/live/manage.mcnutt.cloud/privkey.pem
+
+    ErrorLog  ${APACHE_LOG_DIR}/server-manager-error.log
+    CustomLog ${APACHE_LOG_DIR}/server-manager-access.log combined
+</VirtualHost>
+
+<VirtualHost *:80>
+    ServerName manage.mcnutt.cloud
+    Redirect permanent / https://manage.mcnutt.cloud/
+</VirtualHost>

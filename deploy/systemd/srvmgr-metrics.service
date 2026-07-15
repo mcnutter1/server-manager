@@ -1,0 +1,12 @@
+# Server Manager — metrics + service monitor (systemd service)
+# Install: cp deploy/systemd/* /etc/systemd/system/
+#          systemctl daemon-reload
+#          systemctl enable --now srvmgr-metrics.timer srvmgr-nids.timer
+[Unit]
+Description=Server Manager metrics + service monitor
+After=mysql.service
+
+[Service]
+Type=oneshot
+User=www-data
+ExecStart=/usr/bin/php /var/www/server-manager/bin/collect-metrics.php
