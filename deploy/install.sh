@@ -32,6 +32,15 @@ c_warn()  { printf '\033[1;33m[!]\033[0m %s\n' "$*"; }
 c_err()   { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; }
 die()     { c_err "$*"; exit 1; }
 
+# On any error, tell the operator the install can simply be re-run — every
+# step is idempotent and will resume where it left off.
+on_error() {
+    c_err "Install failed (line ${1:-?}, exit ${2:-?})."
+    c_err "Fix the cause, then re-run:  sudo bash \"${BASH_SOURCE[0]}\""
+    c_err "It is idempotent and will RESUME the partial install."
+}
+trap 'on_error "$LINENO" "$?"' ERR
+
 require_root() { [ "$(id -u)" -eq 0 ] || die "Run with sudo/root."; }
 
 rand_str() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "${1:-40}"; echo; }
@@ -71,6 +80,52 @@ open(path, 'w').write(s.replace(old, new))
 PY
 }
 
+# Detect a previous or crashed/incomplete install and, if found, reuse the
+# existing identifiers so this run REPAIRS/RESUMES rather than clobbering it.
+detect_prior_install() {
+    local dir="${APP_DIR}" found=() f v dbn
+    [ -f "$dir/config/config.php" ]                              && found+=("config/config.php")
+    [ -f "$dir/client_helper/config.php" ]                       && found+=("client_helper/config.php")
+    [ -d "$dir/.git" ]                                           && found+=("git repo")
+    [ -f "$dir/runner/.runner_token" ]                           && found+=("runner token")
+    [ -f /etc/sudoers.d/server-manager ]                         && found+=("sudoers")
+    [ -f /etc/apache2/sites-available/server-manager.conf ]      && found+=("apache vhost")
+    [ -f /etc/systemd/system/srvmgr-metrics.timer ]              && found+=("systemd timers")
+
+    # Pull the real DB name from an existing config for the DB existence check.
+    dbn="${DB_NAME}"
+    if [ -f "$dir/config/config.php" ] && command -v php >/dev/null 2>&1; then
+        v="$(php -r '$c=@require $argv[1]; if(is_array($c)) printf("%s\n%s\n",$c["db"]["name"]??"",$c["db"]["user"]??"");' "$dir/config/config.php" 2>/dev/null)"
+        [ -n "$(sed -n 1p <<<"$v")" ] && dbn="$(sed -n 1p <<<"$v")"
+    fi
+    if command -v mysql >/dev/null 2>&1 && mysql -N -e "SHOW DATABASES LIKE '${dbn}'" 2>/dev/null | grep -q .; then
+        found+=("database '${dbn}'")
+    fi
+
+    [ ${#found[@]} -eq 0 ] && return 0
+
+    echo
+    c_warn "Existing / partial install detected:"
+    for f in "${found[@]}"; do echo "        - $f"; done
+    echo
+    c_info "The installer is idempotent — it will REPAIR/RESUME this install,"
+    c_info "reusing the current DB name/user, password and runner token."
+
+    # Reuse existing identifiers so prompts are skipped and nothing is renamed.
+    if [ -n "${v:-}" ]; then
+        [ -z "${DB_NAME:-}" -o "${DB_NAME}" = "server_manager" ] && DB_NAME="$(sed -n 1p <<<"$v")"
+        [ -z "${DB_USER:-}" -o "${DB_USER}" = "server_manager" ] && DB_USER="$(sed -n 2p <<<"$v")"
+        DB_NAME="${DB_NAME:-$(sed -n 1p <<<"$v")}"
+        DB_USER="${DB_USER:-$(sed -n 2p <<<"$v")}"
+    fi
+
+    if [ "${NONINTERACTIVE:-0}" != "1" ] && [ "${FORCE_RESUME:-0}" != "1" ]; then
+        local __c; read -rp "Continue and repair this install? [Y/n]: " __c
+        case "${__c,,}" in n*) die "Aborted by user.";; esac
+    fi
+    echo
+}
+
 # ---------------------------------------------------------------------
 # Defaults (override via env)
 # ---------------------------------------------------------------------
@@ -104,6 +159,11 @@ echo
 
 prompt SERVER_NAME    "Public domain (ServerName)"          "manage.mcnutt.cloud"
 prompt APP_DIR        "Install directory"                    "$APP_DIR"
+
+# If a prior/partial install exists in APP_DIR, reuse its identifiers and
+# confirm before repairing/resuming.
+detect_prior_install
+
 prompt SERVER_ADMIN_EMAIL "Admin email (Let's Encrypt + alerts)" "$ALERT_EMAIL"
 prompt DB_NAME        "MySQL database name"                  "$DB_NAME"
 prompt DB_USER        "MySQL username"                       "$DB_USER"
@@ -178,9 +238,34 @@ FLUSH PRIVILEGES;
 SQL
 
     c_info "Loading schema…"
-    # Strip the schema's own CREATE DATABASE/USE lines so a custom DB name works.
-    sed -E '/^CREATE DATABASE/d; /^USE /d' "$APP_DIR/sql/schema.sql" | mysql "$DB_NAME"
+    # Strip the schema's own CREATE DATABASE (which may span multiple lines,
+    # up to its terminating ';') and USE statements so a custom DB name works.
+    # Schema is fully idempotent (CREATE TABLE IF NOT EXISTS), so re-runs after
+    # a crash are safe.
+    awk '
+        skip { if ($0 ~ /;/) skip=0; next }
+        /^[[:space:]]*CREATE DATABASE/ { if ($0 !~ /;/) skip=1; next }
+        /^[[:space:]]*USE[[:space:]]/  { next }
+        { print }
+    ' "$APP_DIR/sql/schema.sql" | mysql "$DB_NAME"
     c_ok "Database ready."
+}
+
+# Re-read authoritative secrets from an existing config.php so a resumed
+# (post-crash) install keeps the DB password / runner token in sync instead
+# of regenerating fresh values that would no longer match the stored config.
+load_existing_secrets() {
+    local cfg="$APP_DIR/config/config.php"
+    [ -f "$cfg" ] || return 0
+    command -v php >/dev/null || return 0
+    local vals
+    vals="$(php -r '$c=@require $argv[1]; if(!is_array($c))exit; printf("%s\n%s\n%s\n%s\n", $c["db"]["name"]??"", $c["db"]["user"]??"", $c["db"]["pass"]??"", $c["runner"]["token"]??"");' "$cfg" 2>/dev/null)" || return 0
+    [ -n "$vals" ] || return 0
+    DB_NAME="$(sed -n 1p <<<"$vals")"
+    DB_USER="$(sed -n 2p <<<"$vals")"
+    DB_PASS="$(sed -n 3p <<<"$vals")"
+    RUNNER_TOKEN="$(sed -n 4p <<<"$vals")"
+    c_info "Reusing DB + runner credentials from existing config.php."
 }
 
 # =====================================================================
@@ -224,9 +309,9 @@ generate_config() {
 # =====================================================================
 setup_runner_token() {
     local tf="$APP_DIR/runner/.runner_token"
-    if [ ! -f "$tf" ]; then
-        printf '%s' "$RUNNER_TOKEN" > "$tf"
-    fi
+    # Always write so the on-disk token stays in sync with config.runner.token
+    # (RUNNER_TOKEN is loaded from an existing config.php on a resumed install).
+    printf '%s' "$RUNNER_TOKEN" > "$tf"
     chown root:root "$tf"; chmod 600 "$tf"
     chmod 755 "$APP_DIR/runner/runner.py"
     c_ok "Runner token installed (root:root 600)."
@@ -433,6 +518,7 @@ main() {
     install_packages
     copy_files
     generate_config
+    load_existing_secrets
     setup_database
     setup_runner_token
     install_sudoers
