@@ -41,6 +41,15 @@ final class Auth
         }
 
         self::loadHelper();
+
+        // Process an SSO return: the login service redirects back to our
+        // return_url with ?payload=&sig=. Consume it here (sets the session
+        // cookie + redirects to a clean URL) so we don't loop back to login.
+        if (function_exists('handle_sso_callback')
+            && isset($_GET['payload'], $_GET['sig'])) {
+            handle_sso_callback();
+        }
+
         $allowed = config('auth.allowed_roles', []);
         $auth = ensure_role($allowed, 'any');  // redirects on failure
 

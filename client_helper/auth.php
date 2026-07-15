@@ -71,6 +71,26 @@ function client_ip_c(): string
     return $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0';
 }
 
+/**
+ * True when the request reached us over TLS, accounting for a TLS-terminating
+ * proxy/load balancer in front (X-Forwarded-Proto / X-Forwarded-Ssl).
+ */
+function is_https_c(): bool
+{
+    if (!empty($_SERVER['HTTPS']) && strtolower((string) $_SERVER['HTTPS']) !== 'off') {
+        return true;
+    }
+    if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])
+        && strtolower((string) $_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https') {
+        return true;
+    }
+    if (!empty($_SERVER['HTTP_X_FORWARDED_SSL'])
+        && strtolower((string) $_SERVER['HTTP_X_FORWARDED_SSL']) === 'on') {
+        return true;
+    }
+    return false;
+}
+
 function set_cookie_c(string $value, int $ttl): void
 {
     global $config;
@@ -78,7 +98,7 @@ function set_cookie_c(string $value, int $ttl): void
         'expires'  => time() + $ttl,
         'path'     => '/',
         'domain'   => $config['cookie_domain'] ?? '',
-        'secure'   => true,
+        'secure'   => is_https_c(),
         'httponly' => true,
         'samesite' => 'Lax',
     ]);
@@ -91,7 +111,7 @@ function clear_cookie_c(): void
         'expires'  => time() - 3600,
         'path'     => '/',
         'domain'   => $config['cookie_domain'] ?? '',
-        'secure'   => true,
+        'secure'   => is_https_c(),
         'httponly' => true,
         'samesite' => 'Lax',
     ]);
@@ -236,7 +256,7 @@ function ensure_authenticated(): array
 function mc_redirect_to_login_c(): never
 {
     global $config;
-    $return = (isset($_SERVER['HTTPS']) ? 'https' : 'http') . '://'
+    $return = (is_https_c() ? 'https' : 'http') . '://'
         . ($_SERVER['HTTP_HOST'] ?? 'localhost')
         . ($_SERVER['REQUEST_URI'] ?? '/');
     $url = rtrim($config['login_base'], '/') . '/'
