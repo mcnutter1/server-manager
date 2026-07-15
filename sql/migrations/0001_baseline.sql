@@ -1,29 +1,18 @@
 -- =====================================================================
--- Server Manager — MySQL schema
--- Target: MySQL 8.x / MariaDB 10.5+ on Ubuntu
---
--- NOTE: This file is a full-snapshot convenience reference and an
--- installer fallback. The AUTHORITATIVE, incremental schema lives in
--- sql/migrations/ and is applied by bin/migrate.php (wired into both
--- deploy/install.sh and deploy/update.sh). When you change the schema,
--- add a new numbered migration under sql/migrations/ AND mirror it here.
+-- Migration 0001 — baseline schema (all core tables, pre-traffic-map)
+-- Applied by bin/migrate.php. Idempotent (CREATE TABLE IF NOT EXISTS),
+-- so it is a no-op on databases that were bootstrapped from schema.sql.
+-- The database + user themselves are created by the installer, not here.
 -- =====================================================================
-SET NAMES utf8mb4;
-SET time_zone = '+00:00';
-
-CREATE DATABASE IF NOT EXISTS server_manager
-    CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE server_manager;
 
 -- ---------------------------------------------------------------------
--- Local API tokens (for machine-to-machine access to THIS platform).
--- User auth is delegated to McNutt Cloud Auth; these are for automation.
+-- Local API tokens (machine-to-machine access to THIS platform).
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS api_tokens (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     name          VARCHAR(120)    NOT NULL,
-    token_hash    CHAR(64)        NOT NULL,           -- sha256 of the raw token
-    scopes        JSON            NULL,               -- ["read","services","firewall","nids","apps","runner"]
+    token_hash    CHAR(64)        NOT NULL,
+    scopes        JSON            NULL,
     created_by    VARCHAR(190)    NULL,
     last_used_at  DATETIME        NULL,
     expires_at    DATETIME        NULL,
@@ -39,10 +28,10 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS audit_log (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    actor         VARCHAR(190)    NOT NULL,           -- identity email or "token:<name>"
+    actor         VARCHAR(190)    NOT NULL,
     actor_type    ENUM('user','token','system') NOT NULL DEFAULT 'user',
-    action        VARCHAR(120)    NOT NULL,           -- e.g. service.restart
-    target        VARCHAR(190)    NULL,               -- e.g. apache2, 10.0.0.5
+    action        VARCHAR(120)    NOT NULL,
+    target        VARCHAR(190)    NULL,
     params        JSON            NULL,
     result        ENUM('success','failure','denied') NOT NULL DEFAULT 'success',
     message       TEXT            NULL,
@@ -80,7 +69,7 @@ CREATE TABLE IF NOT EXISTS metrics (
 CREATE TABLE IF NOT EXISTS service_events (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     service       VARCHAR(120)    NOT NULL,
-    state         VARCHAR(40)     NOT NULL,           -- active, inactive, failed, ...
+    state         VARCHAR(40)     NOT NULL,
     sub_state     VARCHAR(60)     NULL,
     detail        TEXT            NULL,
     created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -97,19 +86,17 @@ CREATE TABLE IF NOT EXISTS managed_apps (
     slug          VARCHAR(120)    NOT NULL,
     name          VARCHAR(190)    NOT NULL,
     description   TEXT            NULL,
-    path          VARCHAR(255)    NOT NULL,           -- /var/www/<app>
+    path          VARCHAR(255)    NOT NULL,
     domain        VARCHAR(190)    NULL,
     repo_url      VARCHAR(255)    NULL,
     db_name       VARCHAR(120)    NULL,
     db_user       VARCHAR(120)    NULL,
-    service_name  VARCHAR(120)    NULL,               -- optional systemd unit
-    health_url    VARCHAR(255)    NULL,               -- optional HTTP health check
-    -- Path (relative to app root) to a "helper" the app exposes so this
-    -- platform can interface with it in a common way. See docs/APP_HELPER.md
+    service_name  VARCHAR(120)    NULL,
+    health_url    VARCHAR(255)    NULL,
     helper_path   VARCHAR(255)    NULL DEFAULT 'srvmgr/helper.php',
     helper_token  VARCHAR(190)    NULL,
     status        ENUM('active','disabled','maintenance','unmanaged') NOT NULL DEFAULT 'active',
-    managed       TINYINT(1)      NOT NULL DEFAULT 1, -- 0 = discovered but not adopted
+    managed       TINYINT(1)      NOT NULL DEFAULT 1,
     meta          JSON            NULL,
     last_health   VARCHAR(40)     NULL,
     last_checked  DATETIME        NULL,
@@ -126,8 +113,8 @@ CREATE TABLE IF NOT EXISTS managed_apps (
 -- ---------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS nids_events (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    source        VARCHAR(60)     NOT NULL,           -- auth, apache, manual, ...
-    category      VARCHAR(80)     NOT NULL,           -- ssh_bruteforce, sqli, xss, scan...
+    source        VARCHAR(60)     NOT NULL,
+    category      VARCHAR(80)     NOT NULL,
     severity      ENUM('info','low','medium','high','critical') NOT NULL DEFAULT 'low',
     src_ip        VARCHAR(45)     NOT NULL,
     dst_port      INT UNSIGNED    NULL,
@@ -149,14 +136,14 @@ CREATE TABLE IF NOT EXISTS blocked_hosts (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     ip_address    VARCHAR(45)     NOT NULL,
     reason        VARCHAR(255)    NULL,
-    source        VARCHAR(60)     NOT NULL DEFAULT 'manual', -- manual, nids, api
+    source        VARCHAR(60)     NOT NULL DEFAULT 'manual',
     created_by    VARCHAR(190)    NULL,
     active        TINYINT(1)      NOT NULL DEFAULT 1,
     permanent     TINYINT(1)      NOT NULL DEFAULT 0,
     blocked_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at    DATETIME        NULL,               -- NULL + permanent=1 => never
+    expires_at    DATETIME        NULL,
     unblocked_at  DATETIME        NULL,
-    hits          INT UNSIGNED    NOT NULL DEFAULT 0, -- iptables packet counter snapshot
+    hits          INT UNSIGNED    NOT NULL DEFAULT 0,
     PRIMARY KEY (id),
     KEY idx_ip (ip_address),
     KEY idx_active (active),
@@ -182,7 +169,7 @@ CREATE TABLE IF NOT EXISTS firewall_snapshots (
 CREATE TABLE IF NOT EXISTS command_log (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     actor         VARCHAR(190)    NOT NULL,
-    command_key   VARCHAR(120)    NOT NULL,           -- whitelisted key, not raw shell
+    command_key   VARCHAR(120)    NOT NULL,
     arguments     JSON            NULL,
     exit_code     INT             NULL,
     duration_ms   INT UNSIGNED    NULL,
@@ -201,10 +188,10 @@ CREATE TABLE IF NOT EXISTS command_log (
 CREATE TABLE IF NOT EXISTS alerts (
     id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     severity      ENUM('info','warning','critical') NOT NULL DEFAULT 'warning',
-    category      VARCHAR(80)     NOT NULL,           -- service, resource, nids, app
+    category      VARCHAR(80)     NOT NULL,
     title         VARCHAR(190)    NOT NULL,
     body          TEXT            NULL,
-    fingerprint   CHAR(40)        NULL,               -- de-dupe repeated alerts
+    fingerprint   CHAR(40)        NULL,
     notified      TINYINT(1)      NOT NULL DEFAULT 0,
     acknowledged  TINYINT(1)      NOT NULL DEFAULT 0,
     ack_by        VARCHAR(190)    NULL,
@@ -226,80 +213,6 @@ CREATE TABLE IF NOT EXISTS settings (
     PRIMARY KEY (skey)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- ---------------------------------------------------------------------
--- GeoIP cache. Distinct source IPs are resolved to a country / ISP / lat-lng
--- once and re-used, so we never hammer the upstream geolocation provider.
--- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS geo_cache (
-    ip_address    VARCHAR(45)     NOT NULL,
-    country       VARCHAR(80)     NULL,
-    country_code  CHAR(2)         NULL,
-    region        VARCHAR(120)    NULL,
-    city          VARCHAR(120)    NULL,
-    lat           DECIMAL(9,6)    NULL,
-    lng           DECIMAL(9,6)    NULL,
-    isp           VARCHAR(190)    NULL,
-    org           VARCHAR(190)    NULL,
-    asn           VARCHAR(80)     NULL,
-    status        VARCHAR(20)     NOT NULL DEFAULT 'ok',   -- ok | private | fail
-    updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    PRIMARY KEY (ip_address),
-    KEY idx_country (country_code)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- ---------------------------------------------------------------------
--- Aggregated traffic events. Each ingest run rolls raw log lines up into one
--- row per (window, source IP, app, kind) so the map and tables stay fast.
---   kind = allow : accepted inbound request seen in the apache access log
---   kind = block : traffic dropped by the firewall (iptables byte counters)
---   kind = app   : per-app request line pulled from that app's health helper
--- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS traffic_events (
-    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    window_start  DATETIME        NOT NULL,
-    src_ip        VARCHAR(45)     NOT NULL,
-    app_id        BIGINT UNSIGNED NULL,
-    app_slug      VARCHAR(120)    NULL,
-    host          VARCHAR(190)    NULL,               -- vhost / domain hit
-    kind          ENUM('allow','block','app') NOT NULL DEFAULT 'allow',
-    method        VARCHAR(10)     NULL,
-    top_path      VARCHAR(255)    NULL,
-    status_sample INT             NULL,
-    requests      INT UNSIGNED    NOT NULL DEFAULT 0,
-    errors        INT UNSIGNED    NOT NULL DEFAULT 0,
-    bytes         BIGINT UNSIGNED NOT NULL DEFAULT 0,
-    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    KEY idx_window (window_start),
-    KEY idx_src (src_ip),
-    KEY idx_app (app_id),
-    KEY idx_kind (kind)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- ---------------------------------------------------------------------
--- Raw-ish per-app log lines pulled from each app's health helper "logs"
--- action. Kept short-lived for the drill-down panels on the traffic map.
--- ---------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS app_log_events (
-    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-    app_id        BIGINT UNSIGNED NOT NULL,
-    app_slug      VARCHAR(120)    NULL,
-    level         VARCHAR(20)     NULL,
-    src_ip        VARCHAR(45)     NULL,
-    method        VARCHAR(10)     NULL,
-    path          VARCHAR(255)    NULL,
-    status_code   INT             NULL,
-    bytes         BIGINT UNSIGNED NULL,
-    message       TEXT            NULL,
-    logged_at     DATETIME        NULL,
-    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id),
-    KEY idx_app (app_id),
-    KEY idx_src (src_ip),
-    KEY idx_created (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Seed a couple of defaults.
 INSERT INTO settings (skey, svalue) VALUES
-    ('schema_version', '"1.1.0"')
+    ('schema_version', '"1.0.0"')
 ON DUPLICATE KEY UPDATE svalue = VALUES(svalue);

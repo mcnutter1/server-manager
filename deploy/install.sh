@@ -274,10 +274,21 @@ FLUSH PRIVILEGES;
 SQL
 
     c_info "Loading schema…"
-    # Strip the schema's own CREATE DATABASE (which may span multiple lines,
-    # up to its terminating ';') and USE statements so a custom DB name works.
-    # Schema is fully idempotent (CREATE TABLE IF NOT EXISTS), so re-runs after
-    # a crash are safe.
+    if [ -f "$APP_DIR/bin/migrate.php" ] && [ -d "$APP_DIR/sql/migrations" ] && command -v php >/dev/null 2>&1; then
+        # Preferred path: versioned, tracked migrations. migrate.php reads DB
+        # credentials from the config.php we already generated and records each
+        # applied migration in schema_migrations so future updates are cheap.
+        if php "$APP_DIR/bin/migrate.php"; then
+            c_ok "Database ready (migrations applied)."
+            return
+        fi
+        c_warn "migrate.php failed — falling back to full schema load."
+    fi
+
+    # Fallback: load the full snapshot directly. Strip the schema's own
+    # CREATE DATABASE (which may span multiple lines, up to its terminating ';')
+    # and USE statements so a custom DB name works. Schema is fully idempotent
+    # (CREATE TABLE IF NOT EXISTS), so re-runs after a crash are safe.
     awk '
         skip { if ($0 ~ /;/) skip=0; next }
         /^[[:space:]]*CREATE DATABASE/ { if ($0 !~ /;/) skip=1; next }

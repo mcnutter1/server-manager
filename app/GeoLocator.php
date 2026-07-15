@@ -87,15 +87,14 @@ final class GeoLocator
     /** @param string[] $ips @return array<string,array> */
     private static function cachedRows(array $ips): array
     {
-        $days = (int) config('geo.cache_days', 14);
+        $days = max(1, min((int) config('geo.cache_days', 14), 3650));
         $placeholders = implode(',', array_fill(0, count($ips), '?'));
         $sql = "SELECT * FROM geo_cache
                 WHERE ip_address IN ($placeholders)
-                  AND updated_at >= (NOW() - INTERVAL ? DAY)";
-        $params = array_merge($ips, [$days]);
+                  AND updated_at >= (NOW() - INTERVAL {$days} DAY)";
 
         $rows = [];
-        foreach (Database::instance()->all($sql, $params) as $row) {
+        foreach (Database::instance()->all($sql, $ips) as $row) {
             $rows[$row['ip_address']] = self::normalize($row);
         }
         return $rows;

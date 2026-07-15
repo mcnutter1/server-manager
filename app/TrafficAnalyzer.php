@@ -324,40 +324,43 @@ final class TrafficAnalyzer
     /** Volume + request totals grouped by country. */
     public static function byCountry(int $hours = 24, int $limit = 25): array
     {
+        $hours = self::clampHours($hours);
+        $limit = max(1, min($limit, 500));
         return Database::instance()->all(
             "SELECT COALESCE(g.country, 'Unknown') AS country, g.country_code,
                     SUM(t.requests) AS requests, SUM(t.bytes) AS bytes,
                     COUNT(DISTINCT t.src_ip) AS sources
              FROM traffic_events t
              LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
-             WHERE t.created_at >= (NOW() - INTERVAL ? HOUR)
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
              GROUP BY country, g.country_code
              ORDER BY bytes DESC
-             LIMIT ?",
-            [$hours, max(1, $limit)]
+             LIMIT {$limit}"
         );
     }
 
     /** Volume grouped by ISP / owning network. */
     public static function byIsp(int $hours = 24, int $limit = 25): array
     {
+        $hours = self::clampHours($hours);
+        $limit = max(1, min($limit, 500));
         return Database::instance()->all(
             "SELECT COALESCE(g.isp, 'Unknown') AS isp, g.asn,
                     SUM(t.requests) AS requests, SUM(t.bytes) AS bytes,
                     COUNT(DISTINCT t.src_ip) AS sources
              FROM traffic_events t
              LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
-             WHERE t.created_at >= (NOW() - INTERVAL ? HOUR)
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
              GROUP BY isp, g.asn
              ORDER BY bytes DESC
-             LIMIT ?",
-            [$hours, max(1, $limit)]
+             LIMIT {$limit}"
         );
     }
 
     /** Volume grouped by managed app (kind = app / host attribution). */
     public static function byApp(int $hours = 24): array
     {
+        $hours = self::clampHours($hours);
         return Database::instance()->all(
             "SELECT COALESCE(t.app_slug, t.host, 'server') AS app,
                     t.app_id,
@@ -365,17 +368,17 @@ final class TrafficAnalyzer
                     SUM(t.errors) AS errors,
                     COUNT(DISTINCT t.src_ip) AS sources
              FROM traffic_events t
-             WHERE t.created_at >= (NOW() - INTERVAL ? HOUR)
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
                AND t.kind IN ('allow','app')
              GROUP BY app, t.app_id
-             ORDER BY bytes DESC",
-            [$hours]
+             ORDER BY bytes DESC"
         );
     }
 
     /** Headline counters for the top of the traffic view. */
     public static function summary(int $hours = 24): array
     {
+        $hours = self::clampHours($hours);
         $db = Database::instance();
         $row = $db->one(
             "SELECT
@@ -386,15 +389,13 @@ final class TrafficAnalyzer
                 SUM(errors) AS errors,
                 COUNT(DISTINCT src_ip) AS sources
              FROM traffic_events
-             WHERE created_at >= (NOW() - INTERVAL ? HOUR)",
-            [$hours]
+             WHERE created_at >= (NOW() - INTERVAL {$hours} HOUR)"
         ) ?? [];
 
         $countries = (int) $db->scalar(
             "SELECT COUNT(DISTINCT g.country_code)
              FROM traffic_events t JOIN geo_cache g ON g.ip_address = t.src_ip
-             WHERE t.created_at >= (NOW() - INTERVAL ? HOUR) AND g.country_code IS NOT NULL",
-            [$hours]
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR) AND g.country_code IS NOT NULL"
         );
 
         return [
@@ -429,6 +430,7 @@ final class TrafficAnalyzer
      */
     private static function sourceAggregate(int $hours): array
     {
+        $hours = self::clampHours($hours);
         return Database::instance()->all(
             "SELECT t.src_ip,
                     SUM(t.requests) AS requests,
@@ -439,11 +441,16 @@ final class TrafficAnalyzer
                     g.country, g.country_code, g.city, g.isp, g.lat, g.lng
              FROM traffic_events t
              LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
-             WHERE t.created_at >= (NOW() - INTERVAL ? HOUR)
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
              GROUP BY t.src_ip, g.country, g.country_code, g.city, g.isp, g.lat, g.lng
-             ORDER BY bytes DESC",
-            [$hours]
+             ORDER BY bytes DESC"
         );
+    }
+
+    /** Clamp an hours window to a sane, safe integer for inlining into SQL. */
+    private static function clampHours(int $hours): int
+    {
+        return max(1, min($hours, 24 * 90)); // up to 90 days
     }
 
     /** Normalize a raw app-helper log entry into our canonical shape. */
@@ -552,9 +559,9 @@ final class TrafficAnalyzer
     /** Drop aggregated rows + raw app logs older than the retention window. */
     private static function prune(): void
     {
-        $days = (int) config('traffic.retention_days', 30);
+        $days = max(1, min((int) config('traffic.retention_days', 30), 3650));
         $db = Database::instance();
-        $db->exec('DELETE FROM traffic_events WHERE created_at < (NOW() - INTERVAL ? DAY)', [$days]);
-        $db->exec('DELETE FROM app_log_events WHERE created_at < (NOW() - INTERVAL ? DAY)', [$days]);
+        $db->exec("DELETE FROM traffic_events WHERE created_at < (NOW() - INTERVAL {$days} DAY)");
+        $db->exec("DELETE FROM app_log_events WHERE created_at < (NOW() - INTERVAL {$days} DAY)");
     }
 }

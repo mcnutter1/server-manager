@@ -147,7 +147,19 @@ sync_to_origin() {
 }
 
 apply_migrations() {
-    # Idempotent schema load (all tables use IF NOT EXISTS).
+    # Preferred path: versioned, tracked migrations via bin/migrate.php. Each
+    # migration is recorded in schema_migrations and applied at most once, so
+    # this is cheap on repeat updates. Runs as the web user (reads config.php).
+    if [ -f "$APP_DIR/bin/migrate.php" ] && [ -d "$APP_DIR/sql/migrations" ]; then
+        c_info "Applying database migrations…"
+        if as_user "cd '$APP_DIR' && php bin/migrate.php"; then
+            c_ok "Migrations applied."
+            return
+        fi
+        c_warn "migrate.php failed — falling back to full schema load."
+    fi
+
+    # Fallback: idempotent full-schema load (all tables use IF NOT EXISTS).
     if [ -f "$APP_DIR/sql/schema.sql" ]; then
         c_info "Applying schema (idempotent)…"
         local dbn; dbn="$(php -r '$c=require "'"$APP_DIR"'/config/config.php"; echo $c["db"]["name"];' 2>/dev/null || echo server_manager)"
