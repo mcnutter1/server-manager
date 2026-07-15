@@ -242,9 +242,17 @@ final class AppManager
     /**
      * Call the app's common helper endpoint. Contract (docs/APP_HELPER.md):
      *   POST {app}/{helper_path}
-     *   Header: X-Srvmgr-Token: <helper_token>
-     *   Body:   { "action": "health|stats|migrate|clear_cache|...", ... }
+     *   Body:   { "action": "health|stats|logs|migrate|clear_cache|...", ... }
      *   Reply:  { "ok": true, "data": {...} }
+     *
+     * Authentication is a per-request HMAC signature so the shared secret is
+     * never sent on the wire and captured requests cannot be replayed:
+     *   X-Srvmgr-Timestamp: <unix seconds>
+     *   X-Srvmgr-Nonce:     <random hex, single-use>
+     *   X-Srvmgr-Signature: v1=<base64url(hmac_sha256(secret, canonical))>
+     *   canonical = "{ts}\n{nonce}\nPOST\n{path}\n{sha256(body)}"
+     * The legacy X-Srvmgr-Token header is still sent so older helpers that only
+     * check the shared token keep working during migration.
      */
     public static function callHelper(array $app, string $action, array $params = []): array
     {
@@ -256,27 +264,58 @@ final class AppManager
             ? $app['helper_url']
             : rtrim('https://' . $app['domain'], '/') . '/' . ltrim((string) $app['helper_path'], '/');
 
+        $secret = (string) ($app['helper_token'] ?? '');
+        $body   = json_encode(['action' => $action] + $params, JSON_UNESCAPED_SLASHES);
+        $headers = array_merge(
+            ['Content-Type: application/json'],
+            self::signHeaders($base, (string) $body, $secret)
+        );
+
         $ch = curl_init($base);
         curl_setopt_array($ch, [
             CURLOPT_POST           => true,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 12,
-            CURLOPT_HTTPHEADER     => [
-                'Content-Type: application/json',
-                'X-Srvmgr-Token: ' . (string) ($app['helper_token'] ?? ''),
-            ],
-            CURLOPT_POSTFIELDS     => json_encode(['action' => $action] + $params, JSON_UNESCAPED_SLASHES),
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_POSTFIELDS     => $body,
         ]);
-        $body = curl_exec($ch);
+        $resp = curl_exec($ch);
         $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        $json = json_decode((string) $body, true);
+        $json = json_decode((string) $resp, true);
         if ($code >= 200 && $code < 300 && is_array($json)) {
             AuditLogger::log('app.helper', $app['slug'], ['action' => $action]);
             return ['ok' => (bool) ($json['ok'] ?? true), 'data' => $json['data'] ?? $json];
         }
-        return ['ok' => false, 'error' => "helper HTTP {$code}", 'raw' => $body];
+        return ['ok' => false, 'error' => "helper HTTP {$code}", 'raw' => $resp];
+    }
+
+    /**
+     * Build the signed authentication headers for a helper request.
+     *
+     * @return string[] header lines ready for CURLOPT_HTTPHEADER
+     */
+    private static function signHeaders(string $url, string $body, string $secret): array
+    {
+        $ts    = (string) time();
+        $nonce = bin2hex(random_bytes(16));
+        $path  = parse_url($url, PHP_URL_PATH) ?: '/';
+
+        $canonical = implode("\n", [$ts, $nonce, 'POST', $path, hash('sha256', $body)]);
+        $sig = self::b64url(hash_hmac('sha256', $canonical, $secret, true));
+
+        return [
+            'X-Srvmgr-Token: ' . $secret,          // legacy fallback
+            'X-Srvmgr-Timestamp: ' . $ts,
+            'X-Srvmgr-Nonce: ' . $nonce,
+            'X-Srvmgr-Signature: v1=' . $sig,
+        ];
+    }
+
+    private static function b64url(string $raw): string
+    {
+        return rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
     }
 
     // -----------------------------------------------------------------

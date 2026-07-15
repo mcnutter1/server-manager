@@ -380,6 +380,163 @@
         }
     };
 
+    // ---- Traffic map -------------------------------------------------
+    Views.traffic = {
+        title: 'Traffic Map',
+        _map: null,
+        _layer: null,
+        _hours: 24,
+        render($el) {
+            // The container is rebuilt on every render, so drop any stale map.
+            if (this._map) { try { this._map.remove(); } catch (e) {} this._map = null; this._layer = null; }
+            $el.html(
+                '<div class="section-head"><h2>Traffic flows <span class="sub">apache · firewall · app logs</span></h2>' +
+                '<div class="actions">' +
+                '  <select id="trHours" class="btn ghost">' +
+                '    <option value="1">Last 1h</option><option value="6">Last 6h</option>' +
+                '    <option value="24" selected>Last 24h</option><option value="168">Last 7d</option>' +
+                '  </select>' +
+                (SM.admin ? '<button class="btn ghost" id="trIngest">⟳ Ingest now</button>' : '') +
+                '</div></div>' +
+                '<div class="grid cols-4" id="trStats"></div>' +
+                '<div class="card" style="margin-top:16px;padding:0;overflow:hidden">' +
+                '  <div id="trMap" style="height:440px;width:100%;background:#0d1526"></div></div>' +
+                '<div class="grid cols-2" style="margin-top:16px">' +
+                '  <div class="card"><h3>Top sources <span class="sub">by volume · ISP · country · URL</span></h3><div id="trSources"></div></div>' +
+                '  <div class="card"><h3>By country</h3><div id="trCountries"></div></div>' +
+                '</div>' +
+                '<div class="grid cols-2" style="margin-top:16px">' +
+                '  <div class="card"><h3>By ISP / network</h3><div id="trIsps"></div></div>' +
+                '  <div class="card"><h3>By application</h3><div id="trApps"></div></div>' +
+                '</div>'
+            );
+            $('#trHours').val(String(this._hours)).on('change', () => {
+                this._hours = Number($('#trHours').val()) || 24;
+                this.load();
+            });
+            $('#trIngest').on('click', () => {
+                UI.toast('info', 'Ingesting traffic…');
+                API.post('/traffic/ingest', {}).then(() => { UI.toast('success', 'Ingest complete'); this.load(); })
+                    .catch(() => UI.toast('error', 'Ingest failed'));
+            });
+            this.initMap();
+            this.load();
+        },
+        initMap() {
+            if (typeof L === 'undefined') { return; }
+            if (this._map) { setTimeout(() => this._map.invalidateSize(), 50); return; }
+            const map = L.map('trMap', { worldCopyJump: true, minZoom: 1, attributionControl: false })
+                .setView([25, 0], 2);
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                subdomains: 'abcd', maxZoom: 19
+            }).addTo(map);
+            this._map = map;
+            this._layer = L.layerGroup().addTo(map);
+            setTimeout(() => map.invalidateSize(), 50);
+        },
+        load() {
+            const hours = this._hours;
+            API.get('/traffic/summary?hours=' + hours).then((r) => {
+                const s = r.data;
+                $('#trStats').html(
+                    statBox('Allowed requests', (s.allowed_requests || 0).toLocaleString()) +
+                    statBox('Allowed volume', H.bytes(s.allowed_bytes)) +
+                    statBox('Blocked volume', H.bytes(s.blocked_bytes), s.blocked_bytes > 0 ? 'crit' : '') +
+                    statBox('Sources · countries', (s.sources || 0) + ' · ' + (s.countries || 0))
+                );
+            });
+            this.loadMap(hours);
+            API.get('/traffic/sources?hours=' + hours + '&limit=25').then((r) => {
+                $('#trSources').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>IP</th><th>Country</th><th>ISP</th><th>Top URL</th><th>Reqs</th><th>Volume</th></tr></thead><tbody>' +
+                    (r.data.length ? r.data.map((x) => (
+                        '<tr><td class="mono">' + H.esc(x.src_ip) + (Number(x.blocked_bytes) > 0 ? ' <span class="badge failed">blocked</span>' : '') + '</td>' +
+                        '<td>' + H.esc(x.city ? x.city + ', ' : '') + H.esc(x.country || '—') + '</td>' +
+                        '<td class="muted">' + H.esc(x.isp || '—') + '</td>' +
+                        '<td class="mono" title="' + H.esc(x.apps || '') + '">' + H.esc((x.top_path || x.apps || '—')) + '</td>' +
+                        '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
+                    )).join('') : '<tr><td colspan="6" class="muted">no traffic recorded yet</td></tr>') +
+                    '</tbody></table></div>');
+            });
+            API.get('/traffic/countries?hours=' + hours).then((r) => {
+                $('#trCountries').html(this.simpleTable(r.data, [
+                    ['country', 'Country'], ['sources', 'Sources', true], ['requests', 'Reqs', true], ['bytes', 'Volume', 'bytes']
+                ]));
+            });
+            API.get('/traffic/isps?hours=' + hours).then((r) => {
+                $('#trIsps').html(this.simpleTable(r.data, [
+                    ['isp', 'ISP / network'], ['sources', 'Sources', true], ['requests', 'Reqs', true], ['bytes', 'Volume', 'bytes']
+                ]));
+            });
+            API.get('/traffic/apps?hours=' + hours).then((r) => {
+                $('#trApps').html(this.simpleTable(r.data, [
+                    ['app', 'Application'], ['sources', 'Sources', true], ['requests', 'Reqs', true],
+                    ['errors', 'Errors', true], ['bytes', 'Volume', 'bytes']
+                ]));
+            });
+        },
+        loadMap(hours) {
+            if (!this._map) { return; }
+            API.get('/traffic/map?hours=' + hours).then((r) => {
+                const d = r.data, layer = this._layer;
+                layer.clearLayers();
+                const srv = d.server;
+                L.circleMarker([srv.lat, srv.lng], {
+                    radius: 8, color: '#4f7cff', fillColor: '#4f7cff', fillOpacity: 0.9, weight: 2
+                }).addTo(layer).bindPopup('<b>' + H.esc(srv.label) + '</b><br>this server');
+
+                const maxBytes = Math.max(1, ...d.sources.map((s) => Number(s.bytes) || 0));
+                d.sources.forEach((s) => {
+                    const blocked = s.blocked;
+                    const color = blocked ? '#ff5470' : '#33c48d';
+                    const weight = 1 + 3 * Math.sqrt((Number(s.bytes) || 0) / maxBytes);
+                    L.polyline(this.arc([s.lat, s.lng], [srv.lat, srv.lng]), {
+                        color: color, weight: weight, opacity: 0.5
+                    }).addTo(layer);
+                    L.circleMarker([s.lat, s.lng], {
+                        radius: 3 + 6 * Math.sqrt((Number(s.bytes) || 0) / maxBytes),
+                        color: color, fillColor: color, fillOpacity: 0.7, weight: 1
+                    }).addTo(layer).bindPopup(
+                        '<b>' + H.esc(s.ip) + '</b><br>' +
+                        H.esc((s.city ? s.city + ', ' : '') + (s.country || '')) + '<br>' +
+                        H.esc(s.isp || '') + '<br>' +
+                        (Number(s.requests) || 0).toLocaleString() + ' reqs · ' + H.bytes(s.bytes) +
+                        (blocked ? '<br><span style="color:#ff5470">blocked traffic</span>' : '') +
+                        (s.apps && s.apps.length ? '<br>apps: ' + H.esc(s.apps.join(', ')) : '')
+                    );
+                });
+            });
+        },
+        // Quadratic curve between two lat/lng points for a nicer flow arc.
+        arc(from, to) {
+            const lat1 = from[0], lng1 = from[1], lat2 = to[0], lng2 = to[1];
+            const mLat = (lat1 + lat2) / 2, mLng = (lng1 + lng2) / 2;
+            const dx = lng2 - lng1, dy = lat2 - lat1;
+            const cLat = mLat + dx * 0.15, cLng = mLng - dy * 0.15; // control point offset
+            const pts = [];
+            for (let t = 0; t <= 1.0001; t += 0.05) {
+                const it = 1 - t;
+                pts.push([
+                    it * it * lat1 + 2 * it * t * cLat + t * t * lat2,
+                    it * it * lng1 + 2 * it * t * cLng + t * t * lng2
+                ]);
+            }
+            return pts;
+        },
+        simpleTable(rows, cols) {
+            const head = cols.map((c) => '<th' + (c[2] ? ' class="num"' : '') + '>' + H.esc(c[1]) + '</th>').join('');
+            const body = rows && rows.length ? rows.map((row) => '<tr>' + cols.map((c) => {
+                let v = row[c[0]];
+                if (c[2] === 'bytes') { v = H.bytes(v); }
+                else if (c[2] === true) { v = (Number(v) || 0).toLocaleString(); }
+                else { v = H.esc(v || '—'); }
+                return '<td' + (c[2] ? ' class="mono"' : '') + '>' + v + '</td>';
+            }).join('') + '</tr>').join('') : '<tr><td colspan="' + cols.length + '" class="muted">no data</td></tr>';
+            return '<div class="table-wrap"><table class="data"><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+        }
+    };
+
     // ---- Applications ------------------------------------------------
     Views.apps = {
         title: 'Applications',

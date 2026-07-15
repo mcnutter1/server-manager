@@ -108,4 +108,33 @@ return [
         // iptables chain used exclusively by this system.
         'chain'     => 'SRVMGR_BLOCK',
     ],
+
+    // -----------------------------------------------------------------
+    // GeoIP resolution for the traffic map. Distinct source IPs are resolved
+    // once and cached in the geo_cache table.
+    // -----------------------------------------------------------------
+    'geo' => [
+        'enabled'    => true,
+        'provider'   => 'ip-api',                 // 'ip-api' (free, no key) | 'none'
+        'endpoint'   => 'http://ip-api.com/batch',// free tier is HTTP only, batched, ~15 req/min
+        'cache_days' => 14,                       // how long a cached lookup stays fresh
+        // Where this server sits on the map (destination of every flow arc).
+        // Defaults below are us-east-1; set to your region for accurate arcs.
+        'server_lat'   => 39.0438,
+        'server_lng'   => -77.4874,
+        'server_label' => 'This server',
+    ],
+
+    // -----------------------------------------------------------------
+    // Traffic map ingest: apache access log + firewall counters + per-app
+    // logs pulled from each managed app's health helper.
+    // -----------------------------------------------------------------
+    'traffic' => [
+        'enabled'           => true,
+        'apache_access'     => '/var/log/apache2/access.log',
+        'max_lines_per_run' => 20000,   // cap per ingest cycle
+        'app_log_lines'     => 200,     // lines requested from each app helper
+        'collect_app_logs'  => true,    // pull per-app logs via the health helper
+        'retention_days'    => 30,      // prune traffic_events / app_log_events after this
+    ],
 ];

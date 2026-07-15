@@ -1,0 +1,145 @@
+# Server Manager — App Integration Guide (for AI agents)
+
+> Fetch this file and generate a **helper/health endpoint** for the target app.
+> This is the ONLY thing an app must ship to be fully managed by Server Manager.
+> Everything an AI needs to build it correctly is in this document.
+
+## What you are building
+
+Server Manager (the central platform) talks to each managed application through
+one small **helper endpoint** the app hosts. It lets the platform check health,
+read stats, and trigger safe maintenance actions — without ever seeing the app's
+database credentials (the endpoint runs *inside* the app and uses the app's own
+connection).
+
+You will create ONE file/route in the target app that:
+
+1. Accepts an HTTP **POST** with a JSON body `{ "action": "<name>", ... }`.
+2. Authenticates the caller with a **per-request HMAC signature** so the shared
+   secret is never sent on the wire and captured requests cannot be replayed
+   (a legacy `X-Srvmgr-Token` header is still accepted as a fallback).
+3. Returns JSON `{ "ok": true, "data": { ... } }` (or `ok:false` + `error`).
+4. Implements at minimum the `health` action.
+
+Default location (any stack): served at path **`srvmgr/helper.php`** relative to
+the app's public web root, i.e. `https://<app-domain>/srvmgr/helper.php`.
+For non-PHP stacks, expose the same behaviour at a route named `/srvmgr/helper`
+and register that path when adding the app.
+
+## Wire contract
+
+```
+POST https://<app-domain>/<helper_path>        default helper_path: srvmgr/helper.php
+Content-Type: application/json
+
+Signed-auth headers (preferred — secret never transmitted):
+X-Srvmgr-Timestamp: <unix seconds>            reject if > 300s from now
+X-Srvmgr-Nonce:     <random hex>              single-use
+X-Srvmgr-Signature: v1=<base64url(hmac_sha256(secret, canonical))>
+  canonical = "{timestamp}\n{nonce}\n{method}\n{path}\n{sha256(rawBody)}"
+
+Legacy fallback (older callers only):
+X-Srvmgr-Token: <shared secret>               must equal the app's helper_token
+
+Request body:   { "action": "health", ...optional params }
+Success reply:  200  { "ok": true,  "data": { ... } }
+Auth failure:   401  { "ok": false, "error": "unauthorized" }
+Unknown action: 400  { "ok": false, "error": "unknown action" }
+```
+
+How to verify the signature (server side):
+1. Read the RAW request body bytes (before JSON-decoding).
+2. Rebuild `canonical` from the headers + `hash('sha256', rawBody)`.
+3. Compute `hmac_sha256(helper_token, canonical)`, base64url-encode, prefix `v1=`.
+4. Constant-time compare against `X-Srvmgr-Signature`.
+5. Reject if `|now - timestamp| > 300`. Optionally cache nonces for 5 min and
+   reject duplicates to defeat same-window replay.
+
+The shared secret (`helper_token`) is the **HMAC key** — it is never placed in a
+header. Only the signature travels, so a leaked request/log cannot be replayed
+or forged after the timestamp window.
+
+Rules:
+- Always respond with `Content-Type: application/json`.
+- Compare signatures/tokens with a constant-time function (`hash_equals` in PHP,
+  `crypto.timingSafeEqual` in Node, `hmac.compare_digest` in Python).
+- Never echo the token or secrets back in any response.
+- Require HTTPS in production.
+
+## Standard actions
+
+| action        | request params      | `data` you must return                                   |
+|---------------|---------------------|----------------------------------------------------------|
+| `health`      | —                   | `{ "status": "ok"\|"degraded", "db": true\|false, "time": "<ISO8601>" }` |
+| `stats`       | —                   | app counters, e.g. `{ "users": 123, "sessions": 4 }`     |
+| `logs`        | `{ "lines": 200 }`  | `{ "entries": [ { "ip", "method", "path", "status", "bytes", "time" }, ... ] }` |
+| `version`     | —                   | `{ "version": "<git-sha or semver>" }`                   |
+| `clear_cache` | —                   | `{ "cleared": true }`                                     |
+| `maintenance` | `{ "on": bool }`    | `{ "maintenance": true\|false }`                          |
+| `migrate`     | `{ "confirm": true }` | `{ "migrated": true, "applied": [...] }` — guard behind `confirm` |
+
+Notes on `health`:
+- The platform treats `status` values `ok` or `healthy` as **healthy**; anything
+  else is shown as **degraded**. Set `status: "degraded"` when a dependency
+  (DB, cache, queue) is down but the app still responds.
+- Include `db` (boolean) — result of a trivial `SELECT 1`.
+- Add any extra keys you like (`queue_depth`, `disk_free`, `cache`, etc.).
+
+Notes on `logs` (powers the Server Manager **traffic map**):
+- Return your app's most recent request/access lines, newest-last, capped at
+  `lines` (default 200, max 1000).
+- Each entry SHOULD include at least `ip` (the client IP) so it can be placed on
+  the map and geolocated (country / city / ISP). Include `method`, `path`,
+  `status`, `bytes`, `time` where available for richer breakdowns.
+- Return ONLY request metadata — never request bodies, credentials or secrets.
+- The platform aggregates these per source IP and correlates them with the
+  server's apache log and firewall counters to draw flow arcs and volume tables.
+
+Apps may define custom actions; unknown actions MUST return HTTP 400 with
+`{ "ok": false, "error": "unknown action" }`.
+
+## Optional: lightweight GET health URL
+
+In addition to (or instead of) the POST helper, an app may expose a plain
+**GET** health URL that returns HTTP **2xx/3xx** when healthy. Server Manager
+can probe it directly (no token). Register it as the app's `health_url`.
+The POST helper is preferred because it returns structured data.
+
+## Registration (what to give the platform operator)
+
+After the endpoint exists, register the app in Server Manager
+(Applications → Register) or via API with:
+
+- `name`, `slug`
+- `path` — filesystem path under the platform's `apps_root` (e.g. `/var/www/<app>`)
+- `domain` — public domain used to reach the helper over HTTPS
+- `helper_path` — default `srvmgr/helper.php`; override for non-PHP routes
+- `helper_token` — the SAME shared secret the endpoint checks
+- `health_url` — optional GET health URL
+- `service_name`, `db_name`, `repo_url` — optional metadata
+
+The `helper_token` must match on both sides. Generate a strong random value
+(e.g. `openssl rand -hex 32`) and store it in the app's environment/config as
+`SRVMGR_HELPER_TOKEN`.
+
+## Security requirements (do not skip)
+
+1. Verify the HMAC signature in constant time; the shared secret is the HMAC key
+   and MUST never be placed in a header or written to logs.
+2. Reject requests whose `X-Srvmgr-Timestamp` is more than 300s from now; where
+   possible cache nonces for 5 min and reject duplicates (replay defense).
+3. Serve only over HTTPS.
+4. Put destructive actions (`migrate`, data resets) behind an explicit
+   `confirm: true` param AND consider IP-allowlisting the platform.
+5. The endpoint uses the app's own DB credentials; never transmit them.
+6. For `logs`, expose only metadata (ip/path/status/bytes) — no bodies/secrets.
+7. Do not leak stack traces — catch exceptions and return `status: "degraded"`.
+
+## Reference implementations
+
+- **PHP drop-in** (copy to `srvmgr/helper.php`): `./helper.sample.php.txt`
+- **Machine-readable spec** (actions + schemas): `./spec.json`
+
+Minimal Node/Express and Python/Flask equivalents follow the same contract:
+read JSON body, check `X-Srvmgr-Token` in constant time, switch on `action`,
+return `{ ok, data }`.

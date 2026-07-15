@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Server Manager App Helper Contract",
+  "version": "1.1.0",
+  "description": "Uniform helper/health endpoint every managed application exposes so Server Manager can interface with it. Full instructions: /integrate/llms.txt",
+  "transport": {
+    "method": "POST",
+    "default_path": "srvmgr/helper.php",
+    "url": "https://<app-domain>/<helper_path>",
+    "request_content_type": "application/json",
+    "response_content_type": "application/json",
+    "auth": {
+      "scheme": "hmac-signature",
+      "description": "Per-request HMAC signature so the shared secret never travels on the wire and captured requests cannot be replayed.",
+      "headers": {
+        "X-Srvmgr-Timestamp": "unix seconds; reject if more than 300s from now",
+        "X-Srvmgr-Nonce": "random hex, single-use (optionally cache to block same-window replay)",
+        "X-Srvmgr-Signature": "v1=<base64url(hmac_sha256(secret, canonical))>"
+      },
+      "canonical": "{timestamp}\n{nonce}\n{method}\n{path}\n{sha256(rawBody)}",
+      "secret": "managed_apps.helper_token (HMAC key; never sent)",
+      "comparison": "constant-time (hash_equals)",
+      "legacy_fallback": {
+        "header": "X-Srvmgr-Token",
+        "value": "shared secret == managed_apps.helper_token",
+        "note": "Still accepted for older helpers; prefer the signature."
+      },
+      "on_failure": { "http": 401, "body": { "ok": false, "error": "unauthorized" } }
+    }
+  },
+  "request": {
+    "type": "object",
+    "required": ["action"],
+    "properties": {
+      "action": { "type": "string" }
+    },
+    "additionalProperties": true
+  },
+  "response": {
+    "success": {
+      "type": "object",
+      "required": ["ok", "data"],
+      "properties": {
+        "ok": { "const": true },
+        "data": { "type": "object" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["ok", "error"],
+      "properties": {
+        "ok": { "const": false },
+        "error": { "type": "string" }
+      }
+    }
+  },
+  "actions": {
+    "health": {
+      "required": true,
+      "params": {},
+      "data": {
+        "type": "object",
+        "required": ["status"],
+        "properties": {
+          "status": { "enum": ["ok", "healthy", "degraded"], "description": "ok|healthy => healthy; anything else => degraded" },
+          "db": { "type": "boolean" },
+          "time": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": true
+      }
+    },
+    "stats": {
+      "required": false,
+      "params": {},
+      "data": { "type": "object", "description": "App-specific counters" }
+    },
+    "logs": {
+      "required": false,
+      "description": "Recent request/access log lines for the Server Manager traffic map. Powers per-app attribution, ISP/country/URL/volume breakdowns and flow arcs.",
+      "params": {
+        "type": "object",
+        "properties": { "lines": { "type": "integer", "default": 200, "maximum": 1000 } }
+      },
+      "data": {
+        "type": "object",
+        "required": ["entries"],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "ip": { "type": "string", "description": "client IP (required for map placement)" },
+                "method": { "type": "string" },
+                "path": { "type": "string" },
+                "status": { "type": "integer" },
+                "bytes": { "type": "integer" },
+                "time": { "type": "string", "description": "ISO-8601 or unix seconds" },
+                "level": { "type": "string" },
+                "message": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "version": {
+      "required": false,
+      "params": {},
+      "data": {
+        "type": "object",
+        "properties": { "version": { "type": "string" } }
+      }
+    },
+    "clear_cache": {
+      "required": false,
+      "params": {},
+      "data": {
+        "type": "object",
+        "properties": { "cleared": { "type": "boolean" } }
+      }
+    },
+    "maintenance": {
+      "required": false,
+      "params": {
+        "type": "object",
+        "properties": { "on": { "type": "boolean" } }
+      },
+      "data": {
+        "type": "object",
+        "properties": { "maintenance": { "type": "boolean" } }
+      }
+    },
+    "migrate": {
+      "required": false,
+      "destructive": true,
+      "params": {
+        "type": "object",
+        "required": ["confirm"],
+        "properties": { "confirm": { "const": true } }
+      },
+      "data": {
+        "type": "object",
+        "properties": {
+          "migrated": { "type": "boolean" },
+          "applied": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  },
+  "optional_get_health_url": {
+    "method": "GET",
+    "auth": "none",
+    "healthy_when": "HTTP status 200-399",
+    "registered_as": "managed_apps.health_url"
+  },
+  "registration_fields": {
+    "name": "string",
+    "slug": "string",
+    "path": "filesystem path under apps_root, e.g. /var/www/<app>",
+    "domain": "public domain for HTTPS helper calls",
+    "helper_path": "default srvmgr/helper.php",
+    "helper_token": "shared secret; must match the endpoint",
+    "health_url": "optional GET health URL",
+    "service_name": "optional systemd unit",
+    "db_name": "optional",
+    "repo_url": "optional"
+  },
+  "security": [
+    "Prefer the HMAC signature; verify it in constant time (hash_equals).",
+    "Reject requests whose X-Srvmgr-Timestamp is more than 300s from now.",
+    "Optionally cache X-Srvmgr-Nonce values for 5 min and reject duplicates (replay defense).",
+    "The shared secret is the HMAC key and must never be sent in a header or logged.",
+    "Legacy X-Srvmgr-Token fallback is constant-time compared; remove it once all callers sign.",
+    "Serve only over HTTPS.",
+    "Guard destructive actions behind confirm:true.",
+    "For the logs action, return only metadata (ip/path/status/bytes) — never secrets or request bodies.",
+    "Endpoint uses the app's own DB credentials; never transmit them.",
+    "Catch exceptions; return status:degraded instead of stack traces."
+  ]
+}

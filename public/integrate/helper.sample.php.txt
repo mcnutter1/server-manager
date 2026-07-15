@@ -1,0 +1,175 @@
+<?php
+/**
+ * Server Manager — managed app helper (drop-in reference).
+ *
+ * Copy this file into your application at:  srvmgr/helper.php
+ * (i.e. served at https://<your-app-domain>/srvmgr/helper.php)
+ *
+ * Then:
+ *   1. Set the shared secret via env:  SRVMGR_HELPER_TOKEN=<same as helper_token>
+ *   2. Replace app_db() with your app's real PDO/bootstrap.
+ *   3. Fill in the stats/version/maintenance bodies with your internals.
+ *
+ * Contract (full spec: /integrate/llms.txt):
+ *   POST  <this file>
+ *   Headers (per-request signature — the secret never travels on the wire):
+ *     X-Srvmgr-Timestamp: <unix seconds>
+ *     X-Srvmgr-Nonce:     <random hex>
+ *     X-Srvmgr-Signature: v1=<base64url(hmac_sha256(secret, canonical))>
+ *       canonical = "{timestamp}\n{nonce}\n{method}\n{path}\n{sha256(rawBody)}"
+ *   (Legacy X-Srvmgr-Token: <shared secret> is still accepted as a fallback.)
+ *   Body:   { "action": "health|stats|logs|version|clear_cache|maintenance|migrate", ... }
+ *   Reply:  { "ok": true, "data": { ... } }
+ */
+
+declare(strict_types=1);
+
+header('Content-Type: application/json');
+
+// ---------------------------------------------------------------------
+// 1) Shared secret — MUST equal managed_apps.helper_token in Server Manager.
+//    Load from env/config; never hard-code in source control.
+// ---------------------------------------------------------------------
+$HELPER_TOKEN = getenv('SRVMGR_HELPER_TOKEN') ?: '';
+
+// Read the raw body once — the signature is computed over these exact bytes.
+$rawBody = file_get_contents('php://input') ?: '';
+
+/**
+ * Verify the request is authentic. Prefers the HMAC signature (which never
+ * exposes the secret and cannot be replayed); falls back to the legacy shared
+ * token header for older callers.
+ */
+function srvmgr_authenticate(string $secret, string $rawBody): bool
+{
+    if ($secret === '') {
+        return false;
+    }
+
+    $ts    = $_SERVER['HTTP_X_SRVMGR_TIMESTAMP'] ?? '';
+    $nonce = $_SERVER['HTTP_X_SRVMGR_NONCE'] ?? '';
+    $sig   = $_SERVER['HTTP_X_SRVMGR_SIGNATURE'] ?? '';
+
+    if ($ts !== '' && $nonce !== '' && $sig !== '') {
+        // Reject stale requests (+/- 5 min) to blunt replay attacks.
+        if (abs(time() - (int) $ts) > 300) {
+            return false;
+        }
+        $method = $_SERVER['REQUEST_METHOD'] ?? 'POST';
+        $path   = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+        $canonical = implode("\n", [$ts, $nonce, $method, $path, hash('sha256', $rawBody)]);
+        $expected  = 'v1=' . rtrim(strtr(base64_encode(
+            hash_hmac('sha256', $canonical, $secret, true)
+        ), '+/', '-_'), '=');
+        // Optional hardening: cache seen nonces (e.g. in APCu/Redis) for 5 min
+        // and reject duplicates to prevent same-window replay.
+        return hash_equals($expected, $sig);
+    }
+
+    // Legacy fallback: constant-time compare of the shared token.
+    $provided = $_SERVER['HTTP_X_SRVMGR_TOKEN'] ?? '';
+    return $provided !== '' && hash_equals($secret, $provided);
+}
+
+if (!srvmgr_authenticate($HELPER_TOKEN, $rawBody)) {
+    http_response_code(401);
+    echo json_encode(['ok' => false, 'error' => 'unauthorized']);
+    exit;
+}
+
+// Only POST is accepted.
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') {
+    http_response_code(405);
+    echo json_encode(['ok' => false, 'error' => 'method not allowed']);
+    exit;
+}
+
+$req    = json_decode($rawBody ?: '[]', true) ?: [];
+$action = (string) ($req['action'] ?? '');
+
+function reply(array $data, bool $ok = true, int $code = 200): void
+{
+    http_response_code($code);
+    echo json_encode(['ok' => $ok, 'data' => $data], JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/**
+ * Return your application's PDO connection.
+ * Replace the body with your app's real bootstrap, e.g.:
+ *   return require __DIR__ . '/../config/pdo.php';
+ */
+function app_db(): ?PDO
+{
+    return null; // TODO
+}
+
+switch ($action) {
+    case 'health':
+        $dbOk = false;
+        try {
+            $pdo  = app_db();
+            $dbOk = $pdo ? (bool) $pdo->query('SELECT 1')->fetchColumn() : true;
+        } catch (Throwable $e) {
+            $dbOk = false;
+        }
+        reply([
+            'status' => $dbOk ? 'ok' : 'degraded',
+            'db'     => $dbOk,
+            'time'   => date('c'),
+        ]);
+
+    case 'version':
+        $sha = @trim((string) @shell_exec(
+            'git -C ' . escapeshellarg(dirname(__DIR__)) . ' rev-parse --short HEAD 2>/dev/null'
+        ));
+        reply(['version' => $sha ?: 'unknown']);
+
+    case 'stats':
+        // TODO: return real counters from your app.
+        reply(['users' => 0, 'sessions' => 0]);
+
+    case 'logs':
+        // Return recent request/access lines for the Server Manager traffic map.
+        // Each entry SHOULD include at least an "ip"; the rest are optional but
+        // make the map far richer (method, path, status, bytes, time).
+        // Replace the sample below with a tail of your real access/app log.
+        $lines = max(1, min((int) ($req['lines'] ?? 200), 1000));
+        $entries = [];
+        // Example: tail your own combined access log.
+        //   $file = '/var/www/yourapp/storage/logs/access.log';
+        //   foreach (array_slice(file($file) ?: [], -$lines) as $raw) {
+        //       // parse into the shape below
+        //   }
+        // Sample shape (delete once wired to real data):
+        // $entries[] = [
+        //     'ip'     => '203.0.113.9',
+        //     'method' => 'GET',
+        //     'path'   => '/api/thing',
+        //     'status' => 200,
+        //     'bytes'  => 1423,
+        //     'time'   => date('c'),
+        //     'level'  => 'info',
+        // ];
+        reply(['entries' => $entries]);
+
+    case 'clear_cache':
+        // TODO: flush your app cache.
+        reply(['cleared' => true]);
+
+    case 'maintenance':
+        $on = !empty($req['on']);
+        // TODO: toggle a maintenance flag your app checks on each request.
+        reply(['maintenance' => $on]);
+
+    case 'migrate':
+        // Guarded destructive action — require explicit confirmation.
+        if (empty($req['confirm'])) {
+            reply(['error' => 'confirm required'], false, 400);
+        }
+        // TODO: run your migration runner and collect applied versions.
+        reply(['migrated' => true, 'applied' => []]);
+
+    default:
+        reply(['error' => 'unknown action'], false, 400);
+}

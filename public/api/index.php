@@ -21,6 +21,7 @@ use App\FirewallManager;
 use App\NidsManager;
 use App\AppManager;
 use App\LogAnalyzer;
+use App\TrafficAnalyzer;
 use App\Notifier;
 use App\Runner;
 use App\Database;
@@ -232,6 +233,43 @@ $post('/apps/(?<id>\d+)/helper', static function ($p) use ($input) {
 $del('/apps/(?<id>\d+)', static function ($p) {
     Auth::requirePrivileged('apps');
     Response::ok(AppManager::remove((int) $p['id']));
+});
+
+$get('/apps/(?<id>\d+)/logs', static function ($p) {
+    Auth::requirePrivileged('apps');
+    Response::ok(TrafficAnalyzer::appLogs((int) $p['id'], (int) ($_GET['lines'] ?? 100)));
+});
+
+// =====================================================================
+// Traffic map (geo + flows, stitched from apache + firewall + app logs)
+// =====================================================================
+$get('/traffic/map', static function () {
+    Response::ok(TrafficAnalyzer::mapData((int) ($_GET['hours'] ?? 24)));
+});
+
+$get('/traffic/summary', static function () {
+    Response::ok(TrafficAnalyzer::summary((int) ($_GET['hours'] ?? 24)));
+});
+
+$get('/traffic/sources', static function () {
+    Response::ok(TrafficAnalyzer::topSources((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25)));
+});
+
+$get('/traffic/countries', static function () {
+    Response::ok(TrafficAnalyzer::byCountry((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25)));
+});
+
+$get('/traffic/isps', static function () {
+    Response::ok(TrafficAnalyzer::byIsp((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25)));
+});
+
+$get('/traffic/apps', static function () {
+    Response::ok(TrafficAnalyzer::byApp((int) ($_GET['hours'] ?? 24)));
+});
+
+$post('/traffic/ingest', static function () {
+    Auth::requirePrivileged('nids');
+    Response::ok(TrafficAnalyzer::ingest());
 });
 
 // =====================================================================

@@ -169,9 +169,44 @@ fix_perms() {
 }
 
 reload_services() {
+    ensure_traffic_timer
     systemctl daemon-reload 2>/dev/null || true
-    systemctl restart srvmgr-metrics.timer srvmgr-nids.timer 2>/dev/null || true
+    systemctl restart srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer 2>/dev/null || true
     apache2ctl configtest >/dev/null 2>&1 && systemctl reload apache2 2>/dev/null || c_warn "apache reload skipped."
+}
+
+# Install the traffic worker unit + timer on existing deployments that predate
+# the traffic map feature. Idempotent: only writes when the unit is missing.
+ensure_traffic_timer() {
+    [ -f /etc/systemd/system/srvmgr-traffic.timer ] && return 0
+    local php_bin; php_bin="$(command -v php)"
+    [ -n "$php_bin" ] || return 0
+    c_info "Installing traffic worker timer…"
+
+    cat > /etc/systemd/system/srvmgr-traffic.service <<EOF
+[Unit]
+Description=Server Manager traffic worker (map ingest + geolocate)
+After=mysql.service mariadb.service
+[Service]
+Type=oneshot
+User=${RUN_AS}
+ExecStart=${php_bin} ${APP_DIR}/bin/traffic-worker.php
+EOF
+
+    cat > /etc/systemd/system/srvmgr-traffic.timer <<'EOF'
+[Unit]
+Description=Run Server Manager traffic worker every 2 minutes
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=120
+AccuracySec=15s
+Unit=srvmgr-traffic.service
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now srvmgr-traffic.timer >/dev/null 2>&1 || true
 }
 
 main() {

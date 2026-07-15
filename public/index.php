@@ -20,6 +20,9 @@ $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_
     <title><?= $appName ?></title>
     <meta name="csrf" content="<?= htmlspecialchars(bin2hex(random_bytes(16))) ?>">
     <link rel="preconnect" href="https://cdnjs.cloudflare.com">
+    <link rel="preconnect" href="https://unpkg.com">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
     <link rel="stylesheet" href="/assets/css/app.css?v=1">
 </head>
 <body data-admin="<?= $isAdmin ? '1' : '0' ?>">
@@ -38,6 +41,7 @@ $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_
             <a href="#services"  class="nav-item" data-view="services"><span class="ico">&#9881;</span> Services</a>
             <a href="#firewall"  class="nav-item" data-view="firewall"><span class="ico">&#128737;</span> Firewall</a>
             <a href="#nids"      class="nav-item" data-view="nids"><span class="ico">&#128680;</span> NIDS / Blocks</a>
+            <a href="#traffic"   class="nav-item" data-view="traffic"><span class="ico">&#127758;</span> Traffic Map</a>
             <a href="#apps"      class="nav-item" data-view="apps"><span class="ico">&#128230;</span> Applications</a>
             <a href="#logs"      class="nav-item" data-view="logs"><span class="ico">&#128196;</span> Logs &amp; Usage</a>
             <a href="#runner"    class="nav-item" data-view="runner"><span class="ico">&#9002;_</span> CLI Runner</a>
@@ -78,6 +82,7 @@ $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_
             <div class="view hidden" id="view-services"></div>
             <div class="view hidden" id="view-firewall"></div>
             <div class="view hidden" id="view-nids"></div>
+            <div class="view hidden" id="view-traffic"></div>
             <div class="view hidden" id="view-apps"></div>
             <div class="view hidden" id="view-logs"></div>
             <div class="view hidden" id="view-runner"></div>
@@ -88,6 +93,8 @@ $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>window.SM = { admin: <?= $isAdmin ? 'true' : 'false' ?>, user: <?= json_encode($name) ?> };</script>
 <script src="/assets/js/app.js?v=1"></script>
 </body>

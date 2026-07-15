@@ -469,6 +469,16 @@ User=${WEB_USER}
 ExecStart=${php_bin} ${APP_DIR}/bin/nids-worker.php
 EOF
 
+    cat > /etc/systemd/system/srvmgr-traffic.service <<EOF
+[Unit]
+Description=Server Manager traffic worker (map ingest + geolocate)
+After=mysql.service mariadb.service
+[Service]
+Type=oneshot
+User=${WEB_USER}
+ExecStart=${php_bin} ${APP_DIR}/bin/traffic-worker.php
+EOF
+
     cat > /etc/systemd/system/srvmgr-metrics.timer <<'EOF'
 [Unit]
 Description=Run Server Manager metrics collector every minute
@@ -493,8 +503,20 @@ Unit=srvmgr-nids.service
 WantedBy=timers.target
 EOF
 
+    cat > /etc/systemd/system/srvmgr-traffic.timer <<'EOF'
+[Unit]
+Description=Run Server Manager traffic worker every 2 minutes
+[Timer]
+OnBootSec=120
+OnUnitActiveSec=120
+AccuracySec=15s
+Unit=srvmgr-traffic.service
+[Install]
+WantedBy=timers.target
+EOF
+
     systemctl daemon-reload
-    systemctl enable --now srvmgr-metrics.timer srvmgr-nids.timer >/dev/null 2>&1 || true
+    systemctl enable --now srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer >/dev/null 2>&1 || true
     c_ok "Worker timers enabled."
 }
 

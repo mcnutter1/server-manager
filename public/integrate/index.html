@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server Manager — App Integration</title>
+<meta name="description" content="Build the health/helper endpoint so your app is fully managed by Server Manager. Copy-paste ready for humans and AI agents.">
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --border:#2a3140;
+    --fg:#e6edf3; --muted:#8b949e; --accent:#4f9cff; --accent2:#3fb950;
+    --code:#0b0f16; --warn:#f0a020;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  header{padding:40px 24px 24px;max-width:920px;margin:0 auto}
+  header h1{margin:0 0 6px;font-size:28px}
+  header p{color:var(--muted);margin:0;font-size:16px}
+  main{max-width:920px;margin:0 auto;padding:0 24px 80px}
+  section{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    padding:22px 24px;margin:18px 0}
+  h2{margin:2px 0 12px;font-size:19px}
+  h3{margin:20px 0 8px;font-size:15px;color:var(--accent)}
+  code{background:var(--panel2);padding:.1em .4em;border-radius:5px;font-size:13px;
+    font-family:"SF Mono",SFMono-Regular,ui-monospace,Menlo,Consolas,monospace}
+  pre{position:relative;background:var(--code);border:1px solid var(--border);
+    border-radius:10px;padding:16px 16px;overflow:auto;margin:10px 0}
+  pre code{background:none;padding:0;font-size:13px;line-height:1.55;color:#d5deea}
+  .copy{position:absolute;top:8px;right:8px;background:var(--panel2);color:var(--fg);
+    border:1px solid var(--border);border-radius:7px;padding:4px 10px;font-size:12px;cursor:pointer}
+  .copy:hover{border-color:var(--accent)}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:14px}
+  th,td{border:1px solid var(--border);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2)}
+  .pill{display:inline-block;background:var(--panel2);border:1px solid var(--border);
+    border-radius:999px;padding:2px 10px;font-size:12px;color:var(--muted);margin-right:6px}
+  .grid{display:flex;gap:12px;flex-wrap:wrap;margin-top:8px}
+  .grid a{flex:1 1 200px;background:var(--panel2);border:1px solid var(--border);
+    border-radius:10px;padding:14px 16px;color:var(--fg);display:block}
+  .grid a:hover{border-color:var(--accent);text-decoration:none}
+  .grid a b{display:block;color:var(--accent)}
+  .grid a span{color:var(--muted);font-size:13px}
+  .note{border-left:3px solid var(--warn);background:rgba(240,160,32,.08);
+    padding:10px 14px;border-radius:0 8px 8px 0;margin:12px 0;color:#f4d59a}
+  .ok{color:var(--accent2)}
+  footer{color:var(--muted);text-align:center;padding:24px;font-size:13px}
+  .tabs{display:flex;gap:6px;margin:6px 0 0}
+  .tabs button{background:var(--panel2);color:var(--muted);border:1px solid var(--border);
+    border-radius:8px 8px 0 0;padding:6px 14px;font-size:13px;cursor:pointer}
+  .tabs button.active{color:var(--fg);border-bottom-color:var(--code);background:var(--code)}
+  .tab-body{display:none}
+  .tab-body.active{display:block}
+</style>
+</head>
+<body>
+<header>
+  <h1>Server Manager — App Integration</h1>
+  <p>Ship one small endpoint and your app becomes fully managed: health, stats, and safe maintenance actions from the central hub.</p>
+</header>
+<main>
+
+  <section>
+    <h2>For AI agents</h2>
+    <p>Point your assistant at these machine-readable resources and ask it to
+       generate the endpoint for your app's stack:</p>
+    <div class="grid">
+      <a href="llms.txt"><b>llms.txt</b><span>Full plain-text build instructions</span></a>
+      <a href="spec.json"><b>spec.json</b><span>Machine-readable action + schema spec</span></a>
+      <a href="helper.sample.php.txt"><b>helper.sample.php</b><span>PHP drop-in template (raw)</span></a>
+    </div>
+    <p style="margin-top:14px;color:var(--muted)">Prompt example:
+       <em>“Fetch <code>/integrate/llms.txt</code> and <code>/integrate/spec.json</code>,
+       then create the Server Manager helper endpoint for this
+       [PHP&nbsp;/&nbsp;Node&nbsp;/&nbsp;Python] app, implementing the <code>health</code> and
+       <code>stats</code> actions against our database.”</em></p>
+  </section>
+
+  <section>
+    <h2>The contract</h2>
+    <pre><code>POST https://&lt;app-domain&gt;/&lt;helper_path&gt;      default helper_path: srvmgr/helper.php
+Content-Type: application/json
+
+Signed auth (preferred — the secret never travels on the wire):
+X-Srvmgr-Timestamp: &lt;unix seconds&gt;           reject if &gt; 300s old
+X-Srvmgr-Nonce:     &lt;random hex&gt;             single-use
+X-Srvmgr-Signature: v1=base64url(hmac_sha256(secret, canonical))
+  canonical = "{ts}\n{nonce}\n{method}\n{path}\n{sha256(rawBody)}"
+Legacy fallback:
+X-Srvmgr-Token: &lt;shared secret&gt;              must equal the app's helper_token
+
+Request:   { "action": "health", ...params }
+Success:   200  { "ok": true,  "data": { ... } }
+Auth fail: 401  { "ok": false, "error": "unauthorized" }
+Unknown:   400  { "ok": false, "error": "unknown action" }</code></pre>
+    <div class="note">The <b>shared secret is the HMAC key</b> and is never sent in a
+      header — only the signature is, so captured requests can't be replayed or
+      forged. Verify signatures with a <b>constant-time</b> compare, serve over
+      <b>HTTPS</b>, and never echo the token or DB credentials.</div>
+  </section>
+
+  <section>
+    <h2>Standard actions</h2>
+    <table>
+      <tr><th>action</th><th>params</th><th><code>data</code> to return</th></tr>
+      <tr><td><code>health</code> <span class="pill">required</span></td><td>—</td>
+          <td><code>{ status:"ok"|"degraded", db:bool, time:ISO8601 }</code></td></tr>
+      <tr><td><code>stats</code></td><td>—</td><td>app counters, e.g. <code>{ users, sessions }</code></td></tr>
+      <tr><td><code>logs</code></td><td><code>{ lines:200 }</code></td><td><code>{ entries:[ { ip, method, path, status, bytes, time } ] }</code> — feeds the traffic map</td></tr>
+      <tr><td><code>version</code></td><td>—</td><td><code>{ version:"&lt;sha|semver&gt;" }</code></td></tr>
+      <tr><td><code>clear_cache</code></td><td>—</td><td><code>{ cleared:true }</code></td></tr>
+      <tr><td><code>maintenance</code></td><td><code>{ on:bool }</code></td><td><code>{ maintenance:bool }</code></td></tr>
+      <tr><td><code>migrate</code> <span class="pill">destructive</span></td><td><code>{ confirm:true }</code></td>
+          <td><code>{ migrated:true, applied:[] }</code></td></tr>
+    </table>
+    <p><code>health.status</code> of <code>ok</code>/<code>healthy</code> shows
+       <span class="ok">healthy</span>; anything else shows <b>degraded</b>.
+       Unknown actions must return HTTP&nbsp;400.</p>
+  </section>
+
+  <section>
+    <h2>Reference implementation</h2>
+    <div class="tabs">
+      <button class="active" data-tab="php">PHP</button>
+      <button data-tab="node">Node / Express</button>
+      <button data-tab="py">Python / Flask</button>
+    </div>
+
+    <div class="tab-body active" id="tab-php">
+      <p>Copy to <code>srvmgr/helper.php</code>, set <code>SRVMGR_HELPER_TOKEN</code>,
+         wire <code>app_db()</code>. Full file:
+         <a href="helper.sample.php.txt">helper.sample.php.txt</a></p>
+      <pre><code>&lt;?php
+declare(strict_types=1);
+header('Content-Type: application/json');
+
+$TOKEN = getenv('SRVMGR_HELPER_TOKEN') ?: '';
+$given = $_SERVER['HTTP_X_SRVMGR_TOKEN'] ?? '';
+if ($TOKEN === '' || !hash_equals($TOKEN, $given)) {
+    http_response_code(401);
+    exit(json_encode(['ok'=>false,'error'=>'unauthorized']));
+}
+$req = json_decode(file_get_contents('php://input') ?: '[]', true) ?: [];
+$reply = fn($d,$ok=true,$c=200)=>[http_response_code($c),
+    print(json_encode(['ok'=>$ok,'data'=>$d]))][0];
+
+switch ($req['action'] ?? '') {
+  case 'health':
+    $db = false;
+    try { /* $pdo = your PDO; */ $db = true; } catch (Throwable $e) { $db = false; }
+    $reply(['status'=>$db?'ok':'degraded','db'=>$db,'time'=>date('c')]); break;
+  case 'stats':   $reply(['users'=>0]); break;
+  default:        $reply(['error'=>'unknown action'], false, 400);
+}</code></pre>
+    </div>
+
+    <div class="tab-body" id="tab-node">
+      <pre><code>// routes/srvmgr.js  (mount at /srvmgr/helper)
+const crypto = require('crypto');
+module.exports = (req, res) =&gt; {
+  const token = process.env.SRVMGR_HELPER_TOKEN || '';
+  const given = req.get('X-Srvmgr-Token') || '';
+  const a = Buffer.from(token), b = Buffer.from(given);
+  if (!token || a.length !== b.length || !crypto.timingSafeEqual(a, b))
+    return res.status(401).json({ ok:false, error:'unauthorized' });
+
+  const reply = (data, ok=true, code=200) =&gt; res.status(code).json({ ok, data });
+  switch ((req.body &amp;&amp; req.body.action) || '') {
+    case 'health': {
+      let db = false;
+      try { /* await pool.query('SELECT 1'); */ db = true; } catch { db = false; }
+      return reply({ status: db?'ok':'degraded', db, time: new Date().toISOString() });
+    }
+    case 'stats': return reply({ users: 0 });
+    default:      return reply({ error:'unknown action' }, false, 400);
+  }
+};</code></pre>
+    </div>
+
+    <div class="tab-body" id="tab-py">
+      <pre><code># flask route mounted at /srvmgr/helper
+import os, hmac, datetime
+from flask import request, jsonify
+
+def srvmgr_helper():
+    token = os.environ.get("SRVMGR_HELPER_TOKEN", "")
+    given = request.headers.get("X-Srvmgr-Token", "")
+    if not token or not hmac.compare_digest(token, given):
+        return jsonify(ok=False, error="unauthorized"), 401
+
+    def reply(data, ok=True, code=200):
+        return jsonify(ok=ok, data=data), code
+
+    action = (request.get_json(silent=True) or {}).get("action", "")
+    if action == "health":
+        try:  # db.session.execute("SELECT 1")
+            db = True
+        except Exception:
+            db = False
+        return reply({"status": "ok" if db else "degraded", "db": db,
+                      "time": datetime.datetime.utcnow().isoformat() + "Z"})
+    if action == "stats":
+        return reply({"users": 0})
+    return reply({"error": "unknown action"}, False, 400)</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Register the app</h2>
+    <p>Once the endpoint is live, add it in Server Manager (Applications →
+       Register) with a matching <code>helper_token</code>:</p>
+    <pre><code># generate a strong shared secret and set it in the app's env
+openssl rand -hex 32   # -&gt; SRVMGR_HELPER_TOKEN in the app, helper_token in Server Manager</code></pre>
+    <table>
+      <tr><th>field</th><th>meaning</th></tr>
+      <tr><td><code>domain</code></td><td>public HTTPS host used to reach the helper</td></tr>
+      <tr><td><code>helper_path</code></td><td>default <code>srvmgr/helper.php</code></td></tr>
+      <tr><td><code>helper_token</code></td><td>shared secret — must equal the endpoint's</td></tr>
+      <tr><td><code>health_url</code></td><td>optional plain <b>GET</b> URL (2xx/3xx = healthy)</td></tr>
+      <tr><td><code>path</code></td><td>filesystem path under <code>apps_root</code></td></tr>
+    </table>
+  </section>
+
+</main>
+<footer>Server Manager · App Integration Guide · <a href="llms.txt">llms.txt</a> · <a href="spec.json">spec.json</a></footer>
+
+<script>
+  document.querySelectorAll('pre').forEach(pre => {
+    const b = document.createElement('button');
+    b.className = 'copy'; b.textContent = 'Copy';
+    b.addEventListener('click', () => {
+      navigator.clipboard.writeText(pre.querySelector('code').innerText);
+      b.textContent = 'Copied'; setTimeout(() => b.textContent = 'Copy', 1200);
+    });
+    pre.appendChild(b);
+  });
+  document.querySelectorAll('.tabs button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const parent = btn.closest('section');
+      parent.querySelectorAll('.tabs button').forEach(x => x.classList.remove('active'));
+      parent.querySelectorAll('.tab-body').forEach(x => x.classList.remove('active'));
+      btn.classList.add('active');
+      parent.querySelector('#tab-' + btn.dataset.tab).classList.add('active');
+    });
+  });
+</script>
+</body>
+</html>
