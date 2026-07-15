@@ -239,7 +239,7 @@ function mc_redirect_to_login_c(): never
     $return = (isset($_SERVER['HTTPS']) ? 'https' : 'http') . '://'
         . ($_SERVER['HTTP_HOST'] ?? 'localhost')
         . ($_SERVER['REQUEST_URI'] ?? '/');
-    $url = rtrim($config['login_base'], '/') . '/login'
+    $url = rtrim($config['login_base'], '/') . '/'
         . '?app_id=' . urlencode($config['app_id'])
         . '&return_url=' . urlencode($return);
     header('Location: ' . $url);
