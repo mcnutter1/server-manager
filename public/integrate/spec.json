@@ -146,7 +146,56 @@
           "applied": { "type": "array", "items": { "type": "string" } }
         }
       }
+    },
+    "enroll": {
+      "required": false,
+      "unauthenticated": true,
+      "description": "One-time pairing handshake. Called by Server Manager WITHOUT a signature (the manager does not yet hold the secret). The helper verifies the challenge it previously displayed on its GET page and returns the shared secret exactly once, then permanently disables pairing.",
+      "params": {
+        "type": "object",
+        "required": ["challenge"],
+        "properties": { "challenge": { "type": "string", "description": "single-use key from the helper's pairing page" } }
+      },
+      "data": {
+        "type": "object",
+        "required": ["secret"],
+        "properties": {
+          "secret": { "type": "string", "description": "the app's self-generated shared secret; stored by the manager as helper_token" },
+          "host": { "type": "string" },
+          "paired": { "type": "boolean" }
+        }
+      },
+      "errors": {
+        "already paired": 409,
+        "invalid challenge": 403,
+        "challenge expired": 403
+      }
     }
+  },
+  "pairing": {
+    "summary": "Gated, zero-touch enrollment so no shared secret is ever copied by a human and an unpaired helper never leaks its challenge to a stranger.",
+    "flow": [
+      "Helper auto-generates a 256-bit secret on first run and stores it outside the web root.",
+      "The helper's pairing page is LOCKED. In Server Manager \u2192 Apps \u2192 Pair app the operator generates a short-lived unlock code.",
+      "The operator enters that unlock code on the app's helper page. The helper verifies it against the manager (POST /api/pair/verify) before revealing anything.",
+      "Once unlocked, the helper shows a single-use challenge key (and a combined base64url enrollment key).",
+      "The operator pastes that key back into Server Manager, which POSTs {action:'enroll', challenge} to the helper over HTTPS and receives the secret once.",
+      "The manager registers the app with that secret as helper_token; the helper disables further pairing."
+    ],
+    "verify_endpoint": {
+      "method": "POST",
+      "url": "<manager>/api/pair/verify",
+      "auth": "none (public); returns only valid/invalid",
+      "request": { "code": "the unlock code the operator was shown in the manager" },
+      "response": { "ok": "boolean", "data": { "valid": "boolean" } }
+    },
+    "env": {
+      "SRVMGR_MANAGER_URL": "manager base URL; lets the helper verify unlock codes (enables the gate)",
+      "SRVMGR_PAIR_CODE": "optional static unlock PIN when no manager URL is set",
+      "SRVMGR_HELPER_TOKEN": "optional: set the secret explicitly instead of auto-generating",
+      "SRVMGR_STATE_DIR": "optional: persistent, non-web-served dir for the secret + pairing state"
+    },
+    "re_pair": "Delete pairing.json in the state dir to re-arm pairing (e.g. when moving managers)."
   },
   "optional_get_health_url": {
     "method": "GET",

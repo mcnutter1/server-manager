@@ -77,6 +77,7 @@ Rules:
 | `clear_cache` | —                   | `{ "cleared": true }`                                     |
 | `maintenance` | `{ "on": bool }`    | `{ "maintenance": true\|false }`                          |
 | `migrate`     | `{ "confirm": true }` | `{ "migrated": true, "applied": [...] }` — guard behind `confirm` |
+| `enroll`      | `{ "challenge": "…" }` | `{ "secret": "…" }` — one-time pairing; **unsigned** (see below) |
 
 Notes on `health`:
 - The platform treats `status` values `ok` or `healthy` as **healthy**; anything
@@ -97,6 +98,40 @@ Notes on `logs` (powers the Server Manager **traffic map**):
 
 Apps may define custom actions; unknown actions MUST return HTTP 400 with
 `{ "ok": false, "error": "unknown action" }`.
+
+## Gated pairing (recommended over sharing a secret by hand)
+
+Instead of an operator inventing a `helper_token` and pasting it on both sides,
+the helper generates its own secret and hands it to Server Manager through a
+gated challenge — the secret is never seen or typed, and an unpaired helper
+never shows its challenge to a stranger who simply hits the URL.
+
+Flow:
+1. On first run the helper generates a 256-bit secret from entropy and stores it
+   OUTSIDE the web root (env `SRVMGR_HELPER_TOKEN` overrides; `SRVMGR_STATE_DIR`
+   sets the storage dir).
+2. The helper page is **locked**. In Server Manager → **Apps → Pair app** the
+   operator generates a short-lived **unlock code**.
+3. The operator enters that unlock code on the app's helper page. The helper
+   verifies it against the manager (`POST <manager>/api/pair/verify`, a public
+   valid/invalid check) before revealing anything. Configure the helper with
+   `SRVMGR_MANAGER_URL` (or a static `SRVMGR_PAIR_CODE`) to enable the gate.
+4. Once unlocked, the helper shows a single-use **challenge key** (valid 15 min)
+   plus a combined base64url **enrollment key** (encodes helper URL + challenge).
+5. The operator pastes that key back into Server Manager, which POSTs
+   `{ "action": "enroll", "challenge": "…" }` to the helper over HTTPS (this call
+   is intentionally **unsigned** — the manager does not yet hold the secret; the
+   challenge is the proof). The helper returns `{ "secret": "…" }` exactly once,
+   records `paired_at`, and permanently disables pairing.
+6. Server Manager stores that secret as `helper_token`; all later calls are
+   signed as normal.
+
+Security properties: the secret never appears in a browser or gets typed; the
+pairing page stays locked until the operator proves possession of a
+manager-issued unlock code; the challenge is short-lived + single-use; the
+exchange is server-to-server over HTTPS; and pairing self-disables after the
+first success. To re-pair (e.g. when moving managers) delete `pairing.json` in
+the state dir.
 
 ## Optional: lightweight GET health URL
 
@@ -120,7 +155,9 @@ After the endpoint exists, register the app in Server Manager
 
 The `helper_token` must match on both sides. Generate a strong random value
 (e.g. `openssl rand -hex 32`) and store it in the app's environment/config as
-`SRVMGR_HELPER_TOKEN`.
+`SRVMGR_HELPER_TOKEN`. If you use zero-touch pairing (above), you can skip
+setting `SRVMGR_HELPER_TOKEN` and `helper_token` entirely — the helper mints the
+secret and the **Pair app** flow transfers it automatically.
 
 ## Security requirements (do not skip)
 

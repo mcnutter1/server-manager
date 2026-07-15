@@ -162,9 +162,41 @@ apply_migrations() {
     # Fallback: idempotent full-schema load (all tables use IF NOT EXISTS).
     if [ -f "$APP_DIR/sql/schema.sql" ]; then
         c_info "Applying schema (idempotent)…"
-        local dbn; dbn="$(php -r '$c=require "'"$APP_DIR"'/config/config.php"; echo $c["db"]["name"];' 2>/dev/null || echo server_manager)"
-        sed -E '/^CREATE DATABASE/d; /^USE /d' "$APP_DIR/sql/schema.sql" | mysql "$dbn" 2>/dev/null \
-            && c_ok "Schema applied." || c_warn "Schema apply skipped (check DB creds)."
+        # Authenticate with the SAME app DB credentials the platform uses
+        # (from config.php) rather than relying on root's socket auth, which
+        # may not be configured. Credentials go through a 0600 defaults file
+        # so the password never appears in the process list.
+        local defaults; defaults="$(mktemp /tmp/srvmgr-my.XXXXXX.cnf)"
+        chmod 600 "$defaults"
+        local dbn
+        dbn="$(php -r '
+            $c = @require $argv[1];
+            if (!is_array($c) || empty($c["db"])) { fwrite(STDERR, "no db config\n"); exit(1); }
+            $d = $c["db"];
+            $f = fopen($argv[2], "w");
+            fwrite($f, "[client]\n");
+            fwrite($f, "host="     . ($d["host"] ?? "127.0.0.1") . "\n");
+            fwrite($f, "port="     . ($d["port"] ?? 3306) . "\n");
+            fwrite($f, "user="     . ($d["user"] ?? "") . "\n");
+            fwrite($f, "password=" . ($d["pass"] ?? "") . "\n");
+            fclose($f);
+            echo $d["name"] ?? "server_manager";
+        ' "$APP_DIR/config/config.php" "$defaults" 2>/dev/null || true)"
+        [ -n "$dbn" ] || dbn="server_manager"
+
+        # Strip the schema's own CREATE DATABASE (may span lines) + USE so a
+        # custom DB name works, then load into the target database.
+        if awk '
+                skip { if ($0 ~ /;/) skip=0; next }
+                /^[[:space:]]*CREATE DATABASE/ { if ($0 !~ /;/) skip=1; next }
+                /^[[:space:]]*USE[[:space:]]/  { next }
+                { print }
+            ' "$APP_DIR/sql/schema.sql" | mysql --defaults-extra-file="$defaults" "$dbn"; then
+            c_ok "Schema applied."
+        else
+            c_warn "Schema apply failed (see mysql error above)."
+        fi
+        rm -f "$defaults"
     fi
 }
 

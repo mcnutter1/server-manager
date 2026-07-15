@@ -84,6 +84,90 @@ final class AppManager
         return ['ok' => true, 'id' => $id, 'app' => self::find($id)];
     }
 
+    /**
+     * Enroll (pair) a downstream app using the one-time challenge it displays
+     * on its helper page. We call the helper's unauthenticated `enroll` action
+     * with the challenge, receive the app's self-generated secret over HTTPS,
+     * and register the app with that secret as its helper_token — so no secret
+     * is ever copied by a human.
+     *
+     * Accepts either a combined `enroll_key` (base64url JSON of url+challenge)
+     * or explicit `helper_url`/`domain` + `challenge`.
+     */
+    public static function enroll(array $input): array
+    {
+        $challenge  = trim((string) ($input['challenge'] ?? ''));
+        $helperUrl  = trim((string) ($input['helper_url'] ?? ''));
+        $domain     = trim((string) ($input['domain'] ?? ''));
+        $helperPath = trim((string) ($input['helper_path'] ?? 'srvmgr/helper.php'));
+
+        // Combined enrollment key auto-fills url + challenge (+ host).
+        if (!empty($input['enroll_key'])) {
+            $decoded = self::decodeEnrollKey((string) $input['enroll_key']);
+            if ($decoded) {
+                $helperUrl = $helperUrl !== '' ? $helperUrl : trim((string) ($decoded['u'] ?? ''));
+                $challenge = $challenge !== '' ? $challenge : trim((string) ($decoded['c'] ?? ''));
+                $domain    = $domain !== ''    ? $domain    : trim((string) ($decoded['h'] ?? ''));
+            } elseif ($challenge === '') {
+                // Not a combined key — treat the pasted value as the challenge.
+                $challenge = trim((string) $input['enroll_key']);
+            }
+        }
+
+        if ($challenge === '') {
+            return ['ok' => false, 'error' => 'challenge / enrollment key required'];
+        }
+
+        // Resolve the helper endpoint.
+        $base = $helperUrl !== ''
+            ? $helperUrl
+            : ($domain !== '' ? rtrim('https://' . $domain, '/') . '/' . ltrim($helperPath, '/') : '');
+        if ($base === '' || !filter_var($base, FILTER_VALIDATE_URL)) {
+            return ['ok' => false, 'error' => 'a valid helper URL or domain is required'];
+        }
+        if (!str_starts_with($base, 'https://') && !str_starts_with($base, 'http://')) {
+            return ['ok' => false, 'error' => 'helper URL must be http(s)'];
+        }
+
+        // Claim the secret from the helper using the challenge.
+        $claim = self::claimSecret($base, $challenge);
+        if (empty($claim['ok'])) {
+            return $claim;
+        }
+        $secret = (string) $claim['secret'];
+
+        // Derive the domain (host[:port]) we will call the helper on.
+        if ($domain === '') {
+            $host = parse_url($base, PHP_URL_HOST) ?: '';
+            $port = parse_url($base, PHP_URL_PORT);
+            if ($host === '') {
+                return ['ok' => false, 'error' => 'could not derive host from helper URL'];
+            }
+            $domain = $port && !in_array((int) $port, [80, 443], true) ? "{$host}:{$port}" : $host;
+        }
+
+        // Register (or update) the app with the freshly claimed secret.
+        $reg = self::register([
+            'name'         => $input['name'] ?? $domain,
+            'slug'         => $input['slug'] ?? ($input['name'] ?? $domain),
+            'path'         => $input['path'] ?? '',
+            'domain'       => $domain,
+            'helper_path'  => $helperPath,
+            'helper_token' => $secret,
+            'health_url'   => $input['health_url'] ?? null,
+            'repo_url'     => $input['repo_url'] ?? null,
+            'db_name'      => $input['db_name'] ?? null,
+            'description'  => $input['description'] ?? 'Paired via challenge enrollment',
+            'status'       => 'active',
+        ]);
+        if (empty($reg['ok'])) {
+            return $reg;
+        }
+
+        AuditLogger::log('app.enroll', $domain, ['id' => $reg['id'] ?? null]);
+        return ['ok' => true, 'id' => $reg['id'] ?? null, 'app' => $reg['app'] ?? null, 'paired' => true];
+    }
+
     public static function setStatus(int $id, string $status): array
     {
         $allowed = ['active', 'disabled', 'maintenance'];
@@ -316,6 +400,64 @@ final class AppManager
     private static function b64url(string $raw): string
     {
         return rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
+    }
+
+    /**
+     * Present a challenge to a helper's unauthenticated `enroll` action and
+     * return the shared secret it hands back. This is the only helper call
+     * made WITHOUT a signature — the challenge itself is the proof.
+     *
+     * @return array{ok:bool, secret?:string, error?:string}
+     */
+    private static function claimSecret(string $base, string $challenge): array
+    {
+        $body = json_encode(['action' => 'enroll', 'challenge' => $challenge], JSON_UNESCAPED_SLASHES);
+
+        $ch = curl_init($base);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 12,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS     => $body,
+        ]);
+        $resp = curl_exec($ch);
+        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $cerr = curl_error($ch);
+        curl_close($ch);
+
+        if ($resp === false) {
+            return ['ok' => false, 'error' => 'could not reach helper: ' . ($cerr ?: 'connection failed')];
+        }
+
+        $json = json_decode((string) $resp, true);
+        if ($code >= 200 && $code < 300 && is_array($json) && !empty($json['ok'])) {
+            $secret = (string) ($json['data']['secret'] ?? '');
+            if ($secret === '') {
+                return ['ok' => false, 'error' => 'helper returned no secret'];
+            }
+            return ['ok' => true, 'secret' => $secret];
+        }
+
+        $err = is_array($json)
+            ? (string) ($json['error'] ?? $json['data']['error'] ?? "HTTP {$code}")
+            : "HTTP {$code}";
+        return ['ok' => false, 'error' => "pairing rejected: {$err}"];
+    }
+
+    /** Decode a combined enrollment key (base64url JSON). Returns null if not one. */
+    private static function decodeEnrollKey(string $key): ?array
+    {
+        $key = trim($key);
+        if ($key === '') {
+            return null;
+        }
+        $raw = base64_decode(strtr($key, '-_', '+/'), true);
+        if ($raw === false) {
+            return null;
+        }
+        $doc = json_decode($raw, true);
+        return is_array($doc) && (isset($doc['c']) || isset($doc['u'])) ? $doc : null;
     }
 
     // -----------------------------------------------------------------

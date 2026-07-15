@@ -69,7 +69,8 @@
     <div class="grid">
       <a href="llms.txt"><b>llms.txt</b><span>Full plain-text build instructions</span></a>
       <a href="spec.json"><b>spec.json</b><span>Machine-readable action + schema spec</span></a>
-      <a href="helper.sample.php.txt"><b>helper.sample.php</b><span>PHP drop-in template (raw)</span></a>
+      <a href="helper.download.php"><b>helper.php</b><span>PHP drop-in, pre-filled with this manager's URL</span></a>
+      <a href="helper.sample.php.txt"><b>helper.sample.php</b><span>Raw template (configure manually)</span></a>
     </div>
     <p style="margin-top:14px;color:var(--muted)">Prompt example:
        <em>“Fetch <code>/integrate/llms.txt</code> and <code>/integrate/spec.json</code>,
@@ -114,6 +115,8 @@ Unknown:   400  { "ok": false, "error": "unknown action" }</code></pre>
       <tr><td><code>maintenance</code></td><td><code>{ on:bool }</code></td><td><code>{ maintenance:bool }</code></td></tr>
       <tr><td><code>migrate</code> <span class="pill">destructive</span></td><td><code>{ confirm:true }</code></td>
           <td><code>{ migrated:true, applied:[] }</code></td></tr>
+      <tr><td><code>enroll</code> <span class="pill">unsigned</span></td><td><code>{ challenge:"…" }</code></td>
+          <td><code>{ secret:"…" }</code> — one-time pairing handshake</td></tr>
     </table>
     <p><code>health.status</code> of <code>ok</code>/<code>healthy</code> shows
        <span class="ok">healthy</span>; anything else shows <b>degraded</b>.
@@ -130,8 +133,9 @@ Unknown:   400  { "ok": false, "error": "unknown action" }</code></pre>
 
     <div class="tab-body active" id="tab-php">
       <p>Copy to <code>srvmgr/helper.php</code>, set <code>SRVMGR_HELPER_TOKEN</code>,
-         wire <code>app_db()</code>. Full file:
-         <a href="helper.sample.php.txt">helper.sample.php.txt</a></p>
+         wire <code>app_db()</code>. Download pre-filled with this manager's URL:
+         <a href="helper.download.php">helper.php</a>
+         (or the raw <a href="helper.sample.php.txt">template</a>)</p>
       <pre><code>&lt;?php
 declare(strict_types=1);
 header('Content-Type: application/json');
@@ -209,8 +213,20 @@ def srvmgr_helper():
 
   <section>
     <h2>Register the app</h2>
-    <p>Once the endpoint is live, add it in Server Manager (Applications →
-       Register) with a matching <code>helper_token</code>:</p>
+    <p><b>Gated pairing (recommended):</b> skip inventing a secret. The drop-in
+       helper generates its own on first run and keeps its pairing page
+       <b>locked</b>. In Server Manager → <b>Apps → Pair app</b>, generate an
+       <b>unlock code</b> and enter it on the app's helper page; the helper
+       verifies it against the manager (<code>POST /api/pair/verify</code>) and
+       then reveals a one-time <b>enrollment key</b>. Paste that back into the
+       Pair app dialog — the manager fetches the secret over HTTPS via the
+       unsigned <code>enroll</code> call and stores it as <code>helper_token</code>.
+       Nothing is copied by hand, an unpaired helper never leaks its challenge to
+       a stranger, and pairing self-disables after the first success. Configure
+       the helper with <code>SRVMGR_MANAGER_URL</code> (or a static
+       <code>SRVMGR_PAIR_CODE</code>) to enable the gate.</p>
+    <p>Or register manually (Applications → Register) with a matching
+       <code>helper_token</code>:</p>
     <pre><code># generate a strong shared secret and set it in the app's env
 openssl rand -hex 32   # -&gt; SRVMGR_HELPER_TOKEN in the app, helper_token in Server Manager</code></pre>
     <table>

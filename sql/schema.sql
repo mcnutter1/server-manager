@@ -299,7 +299,25 @@ CREATE TABLE IF NOT EXISTS app_log_events (
     KEY idx_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ---------------------------------------------------------------------
+-- Pairing unlock codes. Short-lived codes the manager issues so an operator
+-- can unlock a downstream app's helper page and reveal its enrollment key.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pairing_codes (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    code_hash     CHAR(64)        NOT NULL,          -- sha256 of the code; plaintext never stored
+    label         VARCHAR(190)    NULL,
+    created_by    VARCHAR(190)    NULL,
+    used          INT UNSIGNED    NOT NULL DEFAULT 0,
+    last_used_at  DATETIME        NULL,
+    expires_at    DATETIME        NOT NULL,
+    created_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uq_code_hash (code_hash),
+    KEY idx_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Seed a couple of defaults.
 INSERT INTO settings (skey, svalue) VALUES
-    ('schema_version', '"1.1.0"')
+    ('schema_version', '"1.2.0"')
 ON DUPLICATE KEY UPDATE svalue = VALUES(svalue);

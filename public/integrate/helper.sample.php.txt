@@ -18,8 +18,23 @@
  *     X-Srvmgr-Signature: v1=<base64url(hmac_sha256(secret, canonical))>
  *       canonical = "{timestamp}\n{nonce}\n{method}\n{path}\n{sha256(rawBody)}"
  *   (Legacy X-Srvmgr-Token: <shared secret> is still accepted as a fallback.)
- *   Body:   { "action": "health|stats|logs|version|clear_cache|maintenance|migrate", ... }
+ *   Body:   { "action": "health|stats|logs|version|clear_cache|maintenance|migrate|enroll", ... }
  *   Reply:  { "ok": true, "data": { ... } }
+ *
+ * Gated pairing (no secret to copy by hand):
+ *   * On first run this helper generates its OWN shared secret from 256 bits
+ *     of entropy and stores it outside the web root (see srvmgr_state_dir()).
+ *   * The pairing page is LOCKED. In Server Manager choose Apps -> Pair app and
+ *     generate an unlock CODE; enter that code on this app's helper page. The
+ *     helper verifies it against the manager (SRVMGR_MANAGER_URL) before it
+ *     reveals anything — so a stranger hitting this URL sees only a locked page.
+ *   * Once unlocked, copy the CHALLENGE / ENROLLMENT KEY shown here back into
+ *     Server Manager. The manager then calls back with the challenge and the
+ *     helper hands over the secret ONCE, over HTTPS. After that, pairing is
+ *     disabled. The secret itself is never shown to a human or typed anywhere.
+ *   * Config: download this helper pre-filled from your manager's
+ *     /integrate/helper.php, or set SRVMGR_MANAGER_URL / edit
+ *     SRVMGR_MANAGER_URL_DEFAULT below (a static SRVMGR_PAIR_CODE PIN also works).
  */
 
 declare(strict_types=1);
@@ -27,10 +42,300 @@ declare(strict_types=1);
 header('Content-Type: application/json');
 
 // ---------------------------------------------------------------------
-// 1) Shared secret — MUST equal managed_apps.helper_token in Server Manager.
-//    Load from env/config; never hard-code in source control.
+// 0) Pairing-gate configuration (edit these two lines, or use env vars).
+//
+//    The pairing page stays LOCKED until an operator enters a one-time
+//    unlock code they generated in Server Manager (Apps -> Pair app). To
+//    verify that code this helper needs to know your manager's base URL.
+//
+//    Easiest: hard-code SRVMGR_MANAGER_URL_DEFAULT below to your manager,
+//    e.g. 'https://manage.mcnutt.cloud'. (The SRVMGR_MANAGER_URL env var,
+//    if set, always wins.) Alternatively set a static shared PIN in
+//    SRVMGR_PAIR_CODE_DEFAULT / the SRVMGR_PAIR_CODE env var.
 // ---------------------------------------------------------------------
-$HELPER_TOKEN = getenv('SRVMGR_HELPER_TOKEN') ?: '';
+const SRVMGR_MANAGER_URL_DEFAULT = '';
+const SRVMGR_PAIR_CODE_DEFAULT   = '';
+
+/** Effective manager base URL: env var overrides the hard-coded default. */
+function srvmgr_manager_url(): string
+{
+    return trim((string) (getenv('SRVMGR_MANAGER_URL') ?: SRVMGR_MANAGER_URL_DEFAULT));
+}
+
+/** Effective static unlock PIN: env var overrides the hard-coded default. */
+function srvmgr_pair_code(): string
+{
+    return (string) (getenv('SRVMGR_PAIR_CODE') ?: SRVMGR_PAIR_CODE_DEFAULT);
+}
+//
+//    The secret MUST equal managed_apps.helper_token in Server Manager. You
+//    can either set it explicitly via env (SRVMGR_HELPER_TOKEN) OR let this
+//    helper auto-generate one from entropy on first run and hand it to the
+//    manager through the one-time challenge pairing flow (recommended).
+//
+//    State (the generated secret + pairing status) is persisted OUTSIDE the
+//    web root. Override the location with SRVMGR_STATE_DIR; the default is a
+//    protected sibling directory next to this file.
+// ---------------------------------------------------------------------
+
+/** Persistent, non-web-served directory for the secret + pairing state. */
+function srvmgr_state_dir(): string
+{
+    $dir = getenv('SRVMGR_STATE_DIR') ?: (__DIR__ . '/.srvmgr-state');
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0700, true);
+        // Best-effort defence-in-depth: block direct web access (Apache).
+        @file_put_contents($dir . '/.htaccess', "Require all denied\nDeny from all\n");
+        @file_put_contents($dir . '/index.html', '');
+    }
+    return $dir;
+}
+
+/**
+ * The long-lived shared secret. Prefers SRVMGR_HELPER_TOKEN; otherwise
+ * generates 256 bits of entropy once and persists it (0600) so it survives
+ * restarts. This is what signs/verifies every subsequent request.
+ */
+function srvmgr_secret(): string
+{
+    $env = getenv('SRVMGR_HELPER_TOKEN');
+    if (is_string($env) && $env !== '') {
+        return $env;
+    }
+    $file = srvmgr_state_dir() . '/secret';
+    $cur  = @file_get_contents($file);
+    if (is_string($cur) && trim($cur) !== '') {
+        return trim($cur);
+    }
+    $secret = bin2hex(random_bytes(32)); // 256 bits of entropy
+    @file_put_contents($file, $secret, LOCK_EX);
+    @chmod($file, 0600);
+    return $secret;
+}
+
+/** Read the pairing state document. */
+function srvmgr_pairing_read(): array
+{
+    $raw = @file_get_contents(srvmgr_state_dir() . '/pairing.json');
+    $doc = is_string($raw) && $raw !== '' ? json_decode($raw, true) : [];
+    return is_array($doc) ? $doc : [];
+}
+
+/** Persist the pairing state document (0600). */
+function srvmgr_pairing_write(array $doc): void
+{
+    $file = srvmgr_state_dir() . '/pairing.json';
+    @file_put_contents($file, json_encode($doc), LOCK_EX);
+    @chmod($file, 0600);
+}
+
+/** Has this app already been claimed by a manager? */
+function srvmgr_is_paired(): bool
+{
+    return !empty(srvmgr_pairing_read()['paired_at']);
+}
+
+/**
+ * Return the active challenge key, minting a fresh single-use one (15 min TTL)
+ * when none is live. Returns null once the app is already paired.
+ */
+function srvmgr_challenge(): ?string
+{
+    if (srvmgr_is_paired()) {
+        return null;
+    }
+    $doc = srvmgr_pairing_read();
+    $now = time();
+    if (!empty($doc['challenge']) && empty($doc['used']) && (int) ($doc['expires'] ?? 0) > $now) {
+        return (string) $doc['challenge'];
+    }
+    // Grouped for readability, e.g. 3F2A-91C7-BE04-5D8A.
+    $code = strtoupper(bin2hex(random_bytes(8)));
+    $code = implode('-', str_split($code, 4));
+    $doc['challenge'] = $code;
+    $doc['expires']   = $now + 900;
+    $doc['used']      = false;
+    srvmgr_pairing_write($doc);
+    return $code;
+}
+
+/**
+ * Pairing handshake (pre-auth). The manager POSTs the challenge it read from
+ * this page; if it matches an unused, unexpired code we hand over the secret
+ * exactly once and permanently disable pairing.
+ */
+function srvmgr_handle_enroll(array $req): void
+{
+    $code = trim((string) ($req['challenge'] ?? ''));
+    $doc  = srvmgr_pairing_read();
+
+    if (!empty($doc['paired_at'])) {
+        reply(['error' => 'already paired'], false, 409);
+    }
+    $active = (string) ($doc['challenge'] ?? '');
+    if ($code === '' || $active === '' || !hash_equals($active, $code)) {
+        reply(['error' => 'invalid challenge'], false, 403);
+    }
+    if ((int) ($doc['expires'] ?? 0) < time() || !empty($doc['used'])) {
+        reply(['error' => 'challenge expired'], false, 403);
+    }
+
+    // Consume the challenge + lock pairing before returning the secret.
+    $doc['used']      = true;
+    $doc['paired_at'] = date('c');
+    $doc['paired_ip'] = $_SERVER['REMOTE_ADDR'] ?? null;
+    srvmgr_pairing_write($doc);
+
+    reply([
+        'secret' => srvmgr_secret(),
+        'host'   => $_SERVER['HTTP_HOST'] ?? null,
+        'paired' => true,
+    ]);
+}
+
+/** True if this helper can verify a manager-issued unlock code at all. */
+function srvmgr_gate_configured(): bool
+{
+    return srvmgr_manager_url() !== '' || srvmgr_pair_code() !== '';
+}
+
+/**
+ * Verify the unlock code the operator presents. Preferred: ask the configured
+ * manager (SRVMGR_MANAGER_URL) whether the code it issued is still valid. This
+ * proves the operator is acting from the manager before we reveal anything.
+ * Fallback: a static shared PIN in SRVMGR_PAIR_CODE.
+ *
+ * @return array{ok:bool, reason:?string}
+ */
+function srvmgr_verify_manager_code(string $code): array
+{
+    $code = trim($code);
+    if ($code === '') {
+        return ['ok' => false, 'reason' => 'Enter the unlock code from your manager.'];
+    }
+
+    $manager = srvmgr_manager_url();
+    if ($manager !== '') {
+        $ch = curl_init(rtrim($manager, '/') . '/api/pair/verify');
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 10,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+            CURLOPT_POSTFIELDS     => json_encode(['code' => $code]),
+        ]);
+        $resp = curl_exec($ch);
+        $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($resp === false) {
+            return ['ok' => false, 'reason' => 'Could not reach the manager to verify the code.'];
+        }
+        $json = json_decode((string) $resp, true);
+        $ok = $http >= 200 && $http < 300 && is_array($json)
+            && (!empty($json['ok']) || !empty($json['data']['valid']));
+        return ['ok' => $ok, 'reason' => $ok ? null : 'Invalid or expired unlock code.'];
+    }
+
+    $static = srvmgr_pair_code();
+    if ($static !== '') {
+        $ok = hash_equals($static, $code);
+        return ['ok' => $ok, 'reason' => $ok ? null : 'Invalid unlock code.'];
+    }
+
+    return ['ok' => false, 'reason' => 'Pairing gate is not configured.'];
+}
+
+/** Shared HTML shell for the pairing pages. */
+function srvmgr_page(string $title, string $body): string
+{
+    return "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>{$title}</title>"
+        . '<style>body{font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:8vh auto;padding:0 20px;color:#e6e6e6;background:#111}'
+        . '.key{font:600 22px/1.4 ui-monospace,monospace;letter-spacing:2px;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:14px 18px;margin:8px 0;word-break:break-all;color:#7dd3fc}'
+        . 'input{font:600 18px ui-monospace,monospace;letter-spacing:2px;width:100%;box-sizing:border-box;background:#1c1c1c;border:1px solid #333;border-radius:8px;padding:12px 14px;color:#e6e6e6;margin:8px 0}'
+        . 'button{font:600 15px system-ui;background:#2563eb;color:#fff;border:0;border-radius:8px;padding:12px 20px;cursor:pointer}'
+        . 'code{background:#222;padding:2px 6px;border-radius:4px}.muted{color:#9aa0a6}.ok{color:#4ade80}.err{color:#f87171}h1{margin-bottom:4px}</style>'
+        . $body;
+}
+
+/** The locked gate: prompt for the manager-issued unlock code. */
+function srvmgr_gate_html(string $host, ?string $error): string
+{
+    $err = $error ? '<p class=err>' . htmlspecialchars($error, ENT_QUOTES) . '</p>' : '';
+    return srvmgr_page("Unlock {$host}",
+        "<h1>🔒 {$host}</h1>"
+        . '<p class=muted>This app is locked. To pair it, open Server Manager, choose '
+        . '<b>Apps → Pair app</b>, generate an <b>unlock code</b>, and enter it here.</p>'
+        . $err
+        . '<form method=post autocomplete=off>'
+        . '<label class=muted for=manager_code>Unlock code from your manager</label>'
+        . '<input id=manager_code name=manager_code placeholder="XXXX-XXXX-XXXX-XXXX" autofocus>'
+        . '<button type=submit>Unlock</button>'
+        . '</form>');
+}
+
+/** The unlocked view: reveal this app's enrollment + challenge keys. */
+function srvmgr_unlocked_html(string $host): string
+{
+    $code   = htmlspecialchars((string) srvmgr_challenge(), ENT_QUOTES);
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $self   = $scheme . '://' . ($_SERVER['HTTP_HOST'] ?? '') . ($_SERVER['SCRIPT_NAME'] ?? '/srvmgr/helper.php');
+    $enroll = htmlspecialchars(rtrim(strtr(base64_encode((string) json_encode([
+        'u' => $self,
+        'c' => (string) srvmgr_challenge(),
+        'h' => $_SERVER['HTTP_HOST'] ?? '',
+    ])), '+/', '-_'), '='), ENT_QUOTES);
+
+    return srvmgr_page("Pair {$host}",
+        "<h1>🔓 {$host} unlocked</h1>"
+        . '<p class=ok>Verified. Paste the enrollment key below back into Server Manager to finish pairing.</p>'
+        . '<h3>Enrollment key <span class=muted>(paste the whole thing for auto-fill)</span></h3><div class=key>' . $enroll . '</div>'
+        . '<h3>Challenge key <span class=muted>(if entering fields manually)</span></h3><div class=key>' . $code . '</div>'
+        . '<p class=muted>These expire in 15 minutes and work only once. Reload to lock again.</p>');
+}
+
+/**
+ * Render the human-facing pairing flow for a browser. A plain GET shows the
+ * locked gate; a POST of the manager unlock code (when valid) reveals the keys.
+ */
+function srvmgr_render_pairing_page(?string $submittedCode = null): void
+{
+    header('Content-Type: text/html; charset=utf-8');
+    $host = htmlspecialchars((string) ($_SERVER['HTTP_HOST'] ?? 'this-app'), ENT_QUOTES);
+
+    if (srvmgr_is_paired()) {
+        $doc  = srvmgr_pairing_read();
+        $when = htmlspecialchars((string) ($doc['paired_at'] ?? ''), ENT_QUOTES);
+        echo srvmgr_page("Paired · {$host}",
+            "<h1>🔒 {$host}</h1>"
+            . '<p class=ok>This app is already paired with a manager' . ($when ? " (since {$when})" : '') . '.</p>'
+            . '<p class=muted>To re-pair, delete <code>'
+            . htmlspecialchars(srvmgr_state_dir(), ENT_QUOTES) . '/pairing.json</code> on the server, then reload.</p>');
+        return;
+    }
+
+    if (!srvmgr_gate_configured()) {
+        echo srvmgr_page("Locked · {$host}",
+            "<h1>🔒 {$host}</h1>"
+            . '<p class=err>Pairing is locked: this helper cannot verify a manager unlock code.</p>'
+            . '<p class=muted>Set <code>SRVMGR_MANAGER_URL</code> (recommended) so this page can verify codes '
+            . 'issued by your Server Manager, or set a static <code>SRVMGR_PAIR_CODE</code>. Then reload.</p>');
+        return;
+    }
+
+    if ($submittedCode !== null) {
+        $result = srvmgr_verify_manager_code($submittedCode);
+        echo !empty($result['ok'])
+            ? srvmgr_unlocked_html($host)
+            : srvmgr_gate_html($host, $result['reason'] ?? 'Invalid or expired unlock code.');
+        return;
+    }
+
+    echo srvmgr_gate_html($host, null);
+}
+
+// The effective secret used to verify signed requests.
+$HELPER_TOKEN = srvmgr_secret();
 
 // Read the raw body once — the signature is computed over these exact bytes.
 $rawBody = file_get_contents('php://input') ?: '';
@@ -69,6 +374,30 @@ function srvmgr_authenticate(string $secret, string $rawBody): bool
     // Legacy fallback: constant-time compare of the shared token.
     $provided = $_SERVER['HTTP_X_SRVMGR_TOKEN'] ?? '';
     return $provided !== '' && hash_equals($secret, $provided);
+}
+
+// ---------------------------------------------------------------------
+// Enrollment / pairing runs BEFORE authentication — the manager does not
+// have the secret yet. A browser GET renders the pairing page; a POST with
+// action=enroll claims the secret using the challenge. Everything else must
+// carry a valid signature.
+// ---------------------------------------------------------------------
+$preReq    = json_decode($rawBody ?: '[]', true);
+$preReq    = is_array($preReq) ? $preReq : [];
+$preAction = (string) ($preReq['action'] ?? '');
+
+if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
+    srvmgr_render_pairing_page();
+    exit;
+}
+if (isset($_POST['manager_code'])) {
+    // Gate form submission from the pairing page (form-encoded, not JSON).
+    srvmgr_render_pairing_page((string) $_POST['manager_code']);
+    exit;
+}
+if ($preAction === 'enroll') {
+    srvmgr_handle_enroll($preReq);
+    exit;
 }
 
 if (!srvmgr_authenticate($HELPER_TOKEN, $rawBody)) {

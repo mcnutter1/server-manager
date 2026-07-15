@@ -20,6 +20,7 @@ use App\ServiceManager;
 use App\FirewallManager;
 use App\NidsManager;
 use App\AppManager;
+use App\PairManager;
 use App\LogAnalyzer;
 use App\TrafficAnalyzer;
 use App\Notifier;
@@ -55,9 +56,12 @@ if ($rawBody !== '') {
 $input = array_merge($_GET, $body);
 
 // ---------------------------------------------------------------------
-// Authenticate (all API routes require it, except the public health ping).
+// Authenticate. All API routes require it, except the public health ping and
+// the pairing-code verification endpoint (called server-to-server by a
+// downstream app's helper, which has no manager credentials yet).
 // ---------------------------------------------------------------------
-if ($path !== '/ping') {
+$publicPaths = ['/ping', '/pair/verify'];
+if (!in_array($path, $publicPaths, true)) {
     Auth::authenticateApi();
 }
 
@@ -210,6 +214,26 @@ $post('/apps', static function () use ($input) {
     Auth::requirePrivileged('apps');
     $result = AppManager::register($input);
     Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
+});
+
+$post('/apps/enroll', static function () use ($input) {
+    Auth::requirePrivileged('apps');
+    $result = AppManager::enroll($input);
+    Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
+});
+
+// Issue a short-lived unlock code to present to a downstream app's helper page.
+$post('/apps/pair/code', static function () use ($input) {
+    Auth::requirePrivileged('apps');
+    Response::ok(PairManager::issueCode($input['label'] ?? null, (int) ($input['ttl'] ?? 900)));
+});
+
+// PUBLIC: a downstream helper verifies the operator-presented unlock code.
+// Returns only valid/invalid; codes are high-entropy + short-lived.
+$post('/pair/verify', static function () use ($input) {
+    usleep(150000); // uniform small delay to blunt brute force
+    $ok = PairManager::verifyCode((string) ($input['code'] ?? ''));
+    Response::json(['ok' => $ok, 'data' => ['valid' => $ok]], $ok ? 200 : 403);
 });
 
 $post('/apps/(?<id>\d+)/status', static function ($p) use ($input) {
