@@ -338,12 +338,22 @@ final class NidsManager
             ];
         }
 
+        // Block/allowlist status — never let a missing table or bad allowlist
+        // entry take down the whole dossier.
+        try {
+            $blockedNow  = self::isBlocked($ip);
+            $whitelisted = self::isWhitelisted($ip);
+        } catch (\Throwable $e) {
+            error_log('[nids] block/allowlist status failed for ' . $ip . ': ' . $e->getMessage());
+            $blockedNow = $whitelisted = false;
+        }
+
         return [
             'ok'          => true,
             'ip'          => $ip,
             'window_hours'=> $hours,
-            'blocked_now' => self::isBlocked($ip),
-            'whitelisted' => self::isWhitelisted($ip),
+            'blocked_now' => $blockedNow,
+            'whitelisted' => $whitelisted,
             'geo'         => $traffic['geo'] ?? [],
             'reputation'  => $traffic['reputation'] ?? [],
             'activity'    => $traffic['activity'] ?? [],

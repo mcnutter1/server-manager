@@ -217,13 +217,30 @@ reload_services() {
     ensure_threatintel_timer
     systemctl daemon-reload 2>/dev/null || true
     systemctl restart srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer srvmgr-threatintel.timer 2>/dev/null || true
-    apache2ctl configtest >/dev/null 2>&1 && systemctl reload apache2 2>/dev/null || c_warn "apache reload skipped."
-    # Flush PHP OPcache so updated PHP code is picked up immediately. Reloading
-    # php-fpm is a no-op under mod_php but essential on FPM setups where stale
-    # bytecode would otherwise keep serving the previous version.
+
+    # Flush PHP OPcache so updated PHP code is picked up immediately.
+    # Under php-fpm a reload flushes the shared bytecode cache. Under mod_php the
+    # cache lives inside the Apache worker processes, so a graceful *reload* keeps
+    # stale bytecode alive — only a full restart clears it. Detect which SAPI is
+    # in use and act accordingly.
+    fpm_found=0
     for svc in $(systemctl list-units --type=service --state=running --no-legend 'php*-fpm.service' 2>/dev/null | awk '{print $1}'); do
+        fpm_found=1
         systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
     done
+
+    if apache2ctl configtest >/dev/null 2>&1; then
+        if [ "$fpm_found" -eq 1 ]; then
+            # PHP runs out-of-process (FPM already flushed above); a graceful
+            # reload of Apache is enough to pick up static assets/config.
+            systemctl reload apache2 2>/dev/null || c_warn "apache reload skipped."
+        else
+            # mod_php: restart Apache to guarantee OPcache is flushed.
+            systemctl restart apache2 2>/dev/null || c_warn "apache restart skipped."
+        fi
+    else
+        c_warn "apache configtest failed; skipping reload."
+    fi
 }
 
 # Install the traffic worker unit + timer on existing deployments that predate
