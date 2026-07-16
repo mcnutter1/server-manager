@@ -503,7 +503,9 @@ $post('/settings', static function () use ($input) {
         return;
     }
     $result = Settings::saveMany($values, Auth::currentActor()['name']);
-    Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 422);
+    // Always 200: the JSON body's "ok" flag carries success/failure so the SPA
+    // can surface per-field validation messages instead of a generic error.
+    Response::json(['ok' => $result['ok'], 'data' => $result], 200);
 });
 
 $post('/settings/reset', static function () use ($input) {

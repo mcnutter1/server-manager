@@ -218,6 +218,12 @@ reload_services() {
     systemctl daemon-reload 2>/dev/null || true
     systemctl restart srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer srvmgr-threatintel.timer 2>/dev/null || true
     apache2ctl configtest >/dev/null 2>&1 && systemctl reload apache2 2>/dev/null || c_warn "apache reload skipped."
+    # Flush PHP OPcache so updated PHP code is picked up immediately. Reloading
+    # php-fpm is a no-op under mod_php but essential on FPM setups where stale
+    # bytecode would otherwise keep serving the previous version.
+    for svc in $(systemctl list-units --type=service --state=running --no-legend 'php*-fpm.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc" 2>/dev/null || true
+    done
 }
 
 # Install the traffic worker unit + timer on existing deployments that predate

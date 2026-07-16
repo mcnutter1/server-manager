@@ -255,56 +255,73 @@ final class NidsManager
         $db = Database::instance();
 
         // Traffic-level detail: geo/ISP, reputation, volume, services,
-        // endpoints, ports probed, and recent per-app request lines.
-        $traffic = TrafficAnalyzer::ipDetail($ip, $hours);
+        // endpoints, ports probed, and recent per-app request lines. Optional —
+        // if the traffic tables are absent the dossier still renders.
+        try {
+            $traffic = TrafficAnalyzer::ipDetail($ip, $hours);
+        } catch (\Throwable $e) {
+            error_log('[nids] traffic detail failed for ' . $ip . ': ' . $e->getMessage());
+            $traffic = [];
+        }
 
         // Full firewall block history (not just the active row).
-        $blocks = $db->all(
-            "SELECT reason, source, created_by, active, permanent,
-                    blocked_at, expires_at, unblocked_at, hits
-             FROM blocked_hosts WHERE ip_address = ?
-             ORDER BY blocked_at DESC LIMIT 100",
-            [$ip]
-        );
-        foreach ($blocks as &$b) {
-            $b['active']    = (int) $b['active'] === 1;
-            $b['permanent'] = (int) $b['permanent'] === 1;
-            $b['remaining_seconds'] = ($b['active'] && !$b['permanent'] && $b['expires_at'])
-                ? max(0, strtotime((string) $b['expires_at']) - time())
-                : null;
+        try {
+            $blocks = $db->all(
+                "SELECT reason, source, created_by, active, permanent,
+                        blocked_at, expires_at, unblocked_at, hits
+                 FROM blocked_hosts WHERE ip_address = ?
+                 ORDER BY blocked_at DESC LIMIT 100",
+                [$ip]
+            );
+            foreach ($blocks as &$b) {
+                $b['active']    = (int) $b['active'] === 1;
+                $b['permanent'] = (int) $b['permanent'] === 1;
+                $b['remaining_seconds'] = ($b['active'] && !$b['permanent'] && $b['expires_at'])
+                    ? max(0, strtotime((string) $b['expires_at']) - time())
+                    : null;
+            }
+            unset($b);
+        } catch (\Throwable $e) {
+            error_log('[nids] block history failed for ' . $ip . ': ' . $e->getMessage());
+            $blocks = [];
         }
-        unset($b);
 
         // NIDS event behaviour grouped by what it did (category), plus a recent
         // raw timeline and the authentication-attempt subset.
-        $byCategory = $db->all(
-            "SELECT source, category, MAX(severity) AS severity,
-                    SUM(count) AS hits, COUNT(*) AS events,
-                    MIN(created_at) AS first_seen, MAX(created_at) AS last_seen
-             FROM nids_events WHERE src_ip = ?
-             GROUP BY source, category ORDER BY hits DESC LIMIT 50",
-            [$ip]
-        );
-        $recentEvents = $db->all(
-            "SELECT source, category, severity, dst_port, signature, raw, count, created_at
-             FROM nids_events WHERE src_ip = ?
-             ORDER BY created_at DESC LIMIT 60",
-            [$ip]
-        );
-        $auth = $db->all(
-            "SELECT category, severity, dst_port, signature, raw, count, created_at
-             FROM nids_events WHERE src_ip = ? AND source = 'auth'
-             ORDER BY created_at DESC LIMIT 40",
-            [$ip]
-        );
-        $counts = $db->one(
-            "SELECT COUNT(*) AS events, COALESCE(SUM(count), 0) AS hits,
-                    SUM(source = 'auth') AS auth_events,
-                    SUM(severity IN ('high','critical')) AS severe,
-                    MIN(created_at) AS first_seen, MAX(created_at) AS last_seen
-             FROM nids_events WHERE src_ip = ?",
-            [$ip]
-        ) ?? [];
+        try {
+            $byCategory = $db->all(
+                "SELECT source, category, MAX(severity) AS severity,
+                        SUM(count) AS hits, COUNT(*) AS events,
+                        MIN(created_at) AS first_seen, MAX(created_at) AS last_seen
+                 FROM nids_events WHERE src_ip = ?
+                 GROUP BY source, category ORDER BY hits DESC LIMIT 50",
+                [$ip]
+            );
+            $recentEvents = $db->all(
+                "SELECT source, category, severity, dst_port, signature, raw, count, created_at
+                 FROM nids_events WHERE src_ip = ?
+                 ORDER BY created_at DESC LIMIT 60",
+                [$ip]
+            );
+            $auth = $db->all(
+                "SELECT category, severity, dst_port, signature, raw, count, created_at
+                 FROM nids_events WHERE src_ip = ? AND source = 'auth'
+                 ORDER BY created_at DESC LIMIT 40",
+                [$ip]
+            );
+            $counts = $db->one(
+                "SELECT COUNT(*) AS events, COALESCE(SUM(count), 0) AS hits,
+                        SUM(source = 'auth') AS auth_events,
+                        SUM(severity IN ('high','critical')) AS severe,
+                        MIN(created_at) AS first_seen, MAX(created_at) AS last_seen
+                 FROM nids_events WHERE src_ip = ?",
+                [$ip]
+            ) ?? [];
+        } catch (\Throwable $e) {
+            error_log('[nids] event history failed for ' . $ip . ': ' . $e->getMessage());
+            $byCategory = $recentEvents = $auth = [];
+            $counts = [];
+        }
 
         // Threat-intel is optional and must never break the dossier — if the
         // ip_reputation table is missing (migration not yet applied) or a feed

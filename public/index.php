@@ -12,6 +12,12 @@ $name = htmlspecialchars($user['name'] ?? 'operator', ENT_QUOTES);
 $roles = htmlspecialchars(implode(', ', $user['roles'] ?? []), ENT_QUOTES);
 $appName = htmlspecialchars((string) \App\config('app.name', 'Server Manager'), ENT_QUOTES);
 $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_roles', []));
+// Cache-bust static assets by their file modification time so every deploy is
+// picked up immediately without manual version bumps.
+$assetVer = static function (string $rel): string {
+    $abs = __DIR__ . $rel;
+    return $rel . '?v=' . (is_file($abs) ? filemtime($abs) : time());
+};
 ?><!doctype html>
 <html lang="en" data-theme="dark">
 <head>
@@ -23,7 +29,7 @@ $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_
     <link rel="preconnect" href="https://unpkg.com">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
           integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-    <link rel="stylesheet" href="/assets/css/app.css?v=1">
+    <link rel="stylesheet" href="<?= htmlspecialchars($assetVer('/assets/css/app.css'), ENT_QUOTES) ?>">
 </head>
 <body data-admin="<?= $isAdmin ? '1' : '0' ?>">
 <div id="app">
@@ -102,6 +108,6 @@ $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>window.SM = { admin: <?= $isAdmin ? 'true' : 'false' ?>, user: <?= json_encode($name) ?> };</script>
-<script src="/assets/js/app.js?v=1"></script>
+<script src="<?= htmlspecialchars($assetVer('/assets/js/app.js'), ENT_QUOTES) ?>"></script>
 </body>
 </html>

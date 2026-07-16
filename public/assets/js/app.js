@@ -414,7 +414,9 @@
                 const $b = $('#nidsDrillBody'); UI.loading($b);
                 API.get('/nids/ip?ip=' + encodeURIComponent(ip) + '&hours=24')
                     .then((r) => { self._data = r.data; $b.html(Views.nids.renderDossier(r.data)); })
-                    .catch(() => $b.html('<p class="muted">failed to load</p>'));
+                    .catch((msg) => $b.html('<div class="drill-section"><p class="muted">Could not load the IP dossier.</p>' +
+                        (msg ? '<p class="muted" style="font-size:12px">' + H.esc(String(msg)) + '</p>' : '') +
+                        '<p class="muted" style="font-size:12px">If this persists, run <code>php bin/migrate.php</code> on the server and check the API error log.</p></div>'));
             }
         },
         renderDossier(d) {
@@ -1576,6 +1578,7 @@
     // ---- Settings (admin only) ---------------------------------------
     Views.settings = {
         title: 'Settings',
+        noAutoRefresh: true,   // never let the 15s timer wipe in-progress edits
         _groups: [],
         render($el) {
             $el.html(
@@ -1601,6 +1604,11 @@
             this.loadStats();
             this.loadSettings();
             this.loadNeverBlock();
+        },
+        // Manual refresh only re-pulls statistics so the editable form and any
+        // unsaved edits are preserved.
+        refresh() {
+            this.loadStats();
         },
         loadStats() {
             API.get('/settings/stats').then((r) => {
@@ -1650,19 +1658,11 @@
                 $('#settingsGroups .sg-head').on('click', function () {
                     $(this).closest('.settings-group').toggleClass('collapsed');
                 });
-                const self = this;
                 $('#settingsGroups').find('input,select').on('input change', function () {
                     $(this).closest('.setting').addClass('dirty');
                     $('#settingsSave').prop('disabled', false);
                 });
-                $('#settingsGroups [data-reset]').on('click', function (e) {
-                    e.preventDefault();
-                    const key = $(this).data('reset');
-                    UI.confirm('Reset "' + key + '" to its file default?', () =>
-                        API.post('/settings/reset', { key: String(key) }).then(() => {
-                            UI.toast('success', 'Reset', String(key)); self.load();
-                        }));
-                });
+                this.bindResets();
             });
         },
         settingRow(s) {
@@ -1714,17 +1714,46 @@
                 if ($f.data('sensitive') && (v === '' || v == null)) { return; } // unchanged secret
                 values[key] = v;
             });
-            if (!Object.keys(values).length) { UI.toast('warn', 'Nothing changed'); return; }
-            $('#settingsSave').prop('disabled', true);
+            if (!Object.keys(values).length) { UI.toast('warn', 'Nothing changed', 'Edit a setting first.'); return; }
+            const $btn = $('#settingsSave');
+            $btn.prop('disabled', true).text('Saving…');
+            const self = this;
             API.post('/settings', { values: values }).then((r) => {
                 const d = r.data || {};
-                if (d.ok) { UI.toast('success', 'Saved', d.saved + ' setting(s) updated'); }
-                else {
+                if (d.ok) {
+                    UI.toast('success', 'Settings saved', d.saved + ' setting(s) updated and applied.');
+                    // Reflect the saved state without tearing down the form: clear
+                    // dirty flags, mark rows overridden, and refresh statistics.
+                    $('#settingsGroups .setting.dirty').each(function () {
+                        const $row = $(this).removeClass('dirty').addClass('overridden');
+                        if (!$row.find('.setting-reset').length) {
+                            const key = $row.data('skey');
+                            $row.find('.setting-meta').html('<a href="#" class="setting-reset" data-reset="' + H.esc(key) + '" title="Revert to file default">overridden · reset</a>');
+                        }
+                        $row.find('input[data-sensitive]').val('');
+                    });
+                    self.bindResets();
+                    self.loadStats();
+                } else {
                     const first = d.errors ? Object.keys(d.errors)[0] : null;
-                    UI.toast('error', 'Some settings rejected', first ? first + ': ' + d.errors[first] : 'validation error');
+                    UI.toast('error', 'Save failed', first ? first + ': ' + d.errors[first] : 'One or more settings were rejected.');
                 }
-                this.load();
-            }).catch(() => { $('#settingsSave').prop('disabled', false); });
+            }).always(() => {
+                $btn.text('Save changes').prop('disabled', $('#settingsGroups .setting.dirty').length === 0);
+            });
+        },
+        bindResets() {
+            const self = this;
+            $('#settingsGroups [data-reset]').off('click').on('click', function (e) {
+                e.preventDefault();
+                const key = $(this).data('reset');
+                UI.confirm('Reset "' + key + '" to its file default?', () =>
+                    API.post('/settings/reset', { key: String(key) }).then(() => {
+                        UI.toast('success', 'Reset', String(key) + ' reverted to default.');
+                        self.loadSettings();
+                        self.loadStats();
+                    }));
+            });
         },
         loadNeverBlock() {
             UI.loading($('#nbTable'));
@@ -1807,17 +1836,20 @@
         Views[name].render($el);
     }
 
-    function refreshCurrent() {
+    function refreshCurrent(isAuto) {
         const v = Views[currentView];
-        if (v && typeof v.load === 'function') v.load();
-        // overview also refreshes host pill/health
-        if (currentView === 'overview') { /* handled by load */ }
+        if (!v) return;
+        // Some views (e.g. Settings, which holds an editable form) must never
+        // be silently reloaded by the auto-refresh timer.
+        if (isAuto && v.noAutoRefresh) return;
+        const fn = (typeof v.refresh === 'function') ? v.refresh : v.load;
+        if (typeof fn === 'function') fn.call(v);
     }
 
     function startAutoRefresh() {
         stopAutoRefresh();
         refreshTimer = setInterval(() => {
-            if ($('#autoRefresh').is(':checked')) refreshCurrent();
+            if ($('#autoRefresh').is(':checked')) refreshCurrent(true);
         }, 15000);
     }
     function stopAutoRefresh() { if (refreshTimer) clearInterval(refreshTimer); }
@@ -1829,7 +1861,7 @@
             switchView($(this).data('view'));
             $('.sidebar').removeClass('open');
         });
-        $('#refreshBtn').on('click', refreshCurrent);
+        $('#refreshBtn').on('click', () => refreshCurrent(false));
         $('#menuToggle').on('click', () => $('.sidebar').toggleClass('open'));
 
         // hash routing
