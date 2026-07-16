@@ -1293,7 +1293,7 @@
             const d = (latest && latest.detail) || {};
             const overall = (latest && latest.status) || a.last_health || 'unknown';
             const summary = d.summary || {};
-            const probes = summary.probes || Object.keys(d).filter((k) => ['http', 'helper', 'version', 'stats'].indexOf(k) >= 0);
+            const probes = summary.probes || Object.keys(d).filter((k) => ['http', 'helper', 'version', 'stats', 'components'].indexOf(k) >= 0);
             const version = d.version || null;
 
             // --- Metrics band: at-a-glance what the check covered ---
@@ -1361,6 +1361,42 @@
                     Views.apps._kvTable(d.stats) + '</div>';
             }
 
+            // --- Components (app-declared common information model) ---
+            const comps = Array.isArray(d.components) ? d.components : [];
+            const cmdCatalog = {};
+            (rep.commands || []).forEach((c) => { if (c && c.key) { cmdCatalog[c.key] = c; } });
+            if (comps.length) {
+                const cstat = (s) => ({
+                    ok: 'healthy', healthy: 'healthy', up: 'healthy', running: 'healthy', active: 'healthy',
+                    degraded: 'degraded', warning: 'degraded',
+                    down: 'unhealthy', critical: 'unhealthy', failed: 'unhealthy', unhealthy: 'unhealthy', stopped: 'unhealthy'
+                }[s] || 'info');
+                html += '<div class="drill-section full"><h4>Components <span class="sub">' + comps.length +
+                    '</span></h4><p class="muted" style="margin-top:-4px">Sub-processes and components this app exposes through its <code>components</code> action.</p>' +
+                    '<div class="table-wrap"><table class="data"><thead><tr><th>Component</th><th>Kind</th><th>Status</th><th>Summary</th><th>Metrics</th>' +
+                    (SM.admin ? '<th style="text-align:right">Commands</th>' : '') + '</tr></thead><tbody>';
+                comps.forEach((c) => {
+                    const mk = c.metrics && typeof c.metrics === 'object' ? Object.keys(c.metrics) : [];
+                    const metrics = mk.length
+                        ? mk.map((k) => '<span class="chip"><span class="sk">' + H.esc(k) + '</span> ' + H.esc(String(c.metrics[k])) + '</span>').join(' ')
+                        : '<span class="muted">—</span>';
+                    let actions = '<span class="muted">—</span>';
+                    if (SM.admin && Array.isArray(c.commands) && c.commands.length) {
+                        actions = c.commands.map((key) => {
+                            const cmd = cmdCatalog[key] || { key: key, name: key };
+                            return '<button class="btn small ghost" data-appcmd="' + H.esc(key) + '">' + H.esc(cmd.name || key) + '</button>';
+                        }).join(' ');
+                    }
+                    html += '<tr><td><strong>' + H.esc(c.name) + '</strong>' + (c.detail ? '<br><span class="muted">' + H.esc(c.detail) + '</span>' : '') + '</td>' +
+                        '<td><span class="badge info">' + H.esc(c.kind) + '</span></td>' +
+                        '<td><span class="badge ' + cstat(c.status) + '">' + H.esc(c.status) + '</span></td>' +
+                        '<td>' + (c.summary ? H.esc(c.summary) : '<span class="muted">—</span>') + '</td>' +
+                        '<td>' + metrics + '</td>' +
+                        (SM.admin ? '<td style="text-align:right">' + actions + '</td>' : '') + '</tr>';
+                });
+                html += '</tbody></table></div></div>';
+            }
+
             // --- Log activity ---
             html += '<div class="drill-section"><h4>Log activity <span class="sub">24h</span></h4>';
             const byLevel = logs.by_level || [];
@@ -1405,6 +1441,49 @@
             html += '</div>';
 
             UI.modal('Health — ' + (a.name || a.slug), html, (_d, close) => close(), 'Close', { size: 'wide' });
+            // Wire component command buttons (admin-only, app-declared commands).
+            $('.modal [data-appcmd]').on('click', function () {
+                const key = String($(this).data('appcmd'));
+                Views.apps.runCommand(a.id, key, cmdCatalog[key]);
+            });
+        },
+        runCommand(appId, key, meta) {
+            meta = meta || { key: key, name: key, params: [] };
+            const params = Array.isArray(meta.params) ? meta.params : [];
+            const doRun = (args) => {
+                UI.toast('info', 'Running…', meta.name || key);
+                API.post('/apps/' + appId + '/command', { command: key, args: args || {} }).then((res) => {
+                    const r = res.data || {};
+                    if (r.ok) {
+                        const result = r.result || {};
+                        const out = result.output != null ? result.output : (result.message != null ? result.message : null);
+                        UI.toast('success', 'Command ran', meta.name || key);
+                        UI.modal('Command — ' + (meta.name || key),
+                            '<pre class="payload">' + H.esc(out != null ? String(out) : JSON.stringify(result, null, 2)) + '</pre>',
+                            (_d, close) => close(), 'Close');
+                    } else {
+                        UI.toast('error', 'Command failed', r.error || '');
+                    }
+                }).catch(() => UI.toast('error', 'Command failed'));
+            };
+            if (params.length) {
+                const fields = params.map((p) => '<div class="field"><label>' + H.esc(p.label || p.name) + (p.required ? ' *' : '') + '</label>' +
+                    (p.type === 'bool'
+                        ? '<select name="' + H.esc(p.name) + '"><option value="true"' + (p.default ? ' selected' : '') + '>true</option><option value="false"' + (!p.default ? ' selected' : '') + '>false</option></select>'
+                        : '<input name="' + H.esc(p.name) + '" value="' + H.esc(p.default != null ? String(p.default) : '') + '">') + '</div>').join('');
+                UI.modal(meta.name || key,
+                    (meta.description ? '<p class="muted">' + H.esc(meta.description) + '</p>' : '') + fields,
+                    (d, close) => {
+                        const args = {};
+                        params.forEach((p) => { let v = d[p.name]; if (p.type === 'bool') { v = (v === 'true' || v === true); } args[p.name] = v; });
+                        close();
+                        doRun(args);
+                    }, 'Run');
+            } else if (meta.dangerous) {
+                UI.confirm('Run “' + (meta.name || key) + '”?', () => doRun({}));
+            } else {
+                doRun({});
+            }
         },
         _kvTable(obj) {
             const fmt = (v) => {
@@ -1451,15 +1530,17 @@
         registerModal(prefill) {
             prefill = prefill || {};
             UI.modal('Register application',
+                '<p class="muted" style="margin-top:0">Register the app first — no pairing info needed here. ' +
+                'Once registered, use <strong>Pair app</strong> to attach its helper securely.</p>' +
                 '<div class="field"><label>Name</label><input name="name" value="' + H.esc(prefill.name || '') + '"></div>' +
                 '<div class="field"><label>Path</label><input name="path" value="' + H.esc(prefill.path || '/var/www/') + '"></div>' +
-                '<div class="field"><label>Domain</label><input name="domain" placeholder="app.mcnutt.cloud"></div>' +
-                '<div class="field"><label>Helper URL <span class="muted">(full URL to helper.php)</span></label>' +
-                '<input name="helper_url" placeholder="https://app.mcnutt.cloud/srvmgr/helper.php"></div>' +
-                '<div class="field"><label>Repo URL</label><input name="repo_url" placeholder="git@…"></div>' +
+                '<div class="field"><label>Domain <span class="muted">(optional)</span></label><input name="domain" placeholder="app.mcnutt.cloud"></div>' +
+                '<div class="field"><label>Description <span class="muted">(optional)</span></label><input name="description"></div>' +
+                '<details style="margin:4px 0 2px"><summary class="muted" style="cursor:pointer">Advanced <span class="muted">(optional)</span></summary>' +
+                '<div class="field" style="margin-top:8px"><label>Repo URL</label><input name="repo_url" placeholder="git@…"></div>' +
                 '<div class="field"><label>Database name</label><input name="db_name"></div>' +
-                '<div class="field"><label>Health URL</label><input name="health_url" placeholder="https://app.mcnutt.cloud/health"></div>' +
-                '<div class="field"><label>Helper token <span class="muted">(or pair instead)</span></label><input name="helper_token" placeholder="shared secret for helper.php"></div>',
+                '<div class="field"><label>Service name</label><input name="service_name"></div>' +
+                '<div class="field"><label>Health URL</label><input name="health_url" placeholder="https://app.mcnutt.cloud/health"></div></details>',
                 (d, close) => {
                     if (!d.name || !d.path) { UI.toast('warn', 'Name and path required'); return; }
                     API.post('/apps', d).then((res) => {
@@ -1502,7 +1583,11 @@
         pairModal() {
             API.get('/apps').then((r) => {
                 const apps = (r.data || []).filter((a) => a && a.slug);
-                const opts = ['<option value="">— New app —</option>'].concat(
+                if (!apps.length) {
+                    UI.toast('warn', 'Register an app first', 'Pairing attaches a helper to an existing registration');
+                    return;
+                }
+                const opts = ['<option value="">— choose app —</option>'].concat(
                     apps.map((a) => '<option value="' + a.id + '">' + H.esc(a.name || a.slug) +
                         (a.domain ? ' (' + H.esc(a.domain) + ')' : '') +
                         (a.helper_token ? ' • paired' : '') + '</option>')
@@ -1510,50 +1595,36 @@
                 UI.modal('Pair application',
                     '<div class="card" style="margin:0 0 14px;padding:12px 14px">' +
                     '<strong>Step 1 — choose the app</strong>' +
-                    '<p class="muted" style="margin:6px 0">Pick an existing registration to attach the secret to, ' +
-                    'or start a new one. Pairing writes the shared secret into the selected app.</p>' +
+                    '<p class="muted" style="margin:6px 0">Pick the registered app to attach the helper to. ' +
+                    'Pairing writes the shared secret into this app.</p>' +
                     '<div class="field"><select id="pairAppSelect">' + opts + '</select></div>' +
                     '<input type="hidden" name="slug"></div>' +
                     '<div class="card" style="margin:0 0 14px;padding:12px 14px">' +
-                    '<strong>Step 2 — unlock the app</strong>' +
+                    '<strong>Step 2 — unlock token</strong>' +
                     '<p class="muted" style="margin:6px 0">Generate a one-time, signed unlock token, then paste it on the app\'s ' +
                     'helper page (<span class="mono">https://&lt;app&gt;/srvmgr/helper.php</span>). ' +
                     'The app verifies this manager\'s signature offline, then reveals a single enrollment payload.</p>' +
                     '<button class="btn small" id="genCodeBtn" type="button">Generate unlock token</button>' +
                     '<div id="unlockCodeBox" style="margin-top:8px"></div></div>' +
                     '<div class="card" style="margin:0;padding:12px 14px">' +
-                    '<strong>Step 3 — finish pairing</strong>' +
+                    '<strong>Step 3 — enrollment payload</strong>' +
                     '<p class="muted" style="margin:6px 0">Paste the single enrollment payload the app showed after unlocking. ' +
-                    'It carries the URL, challenge and signing key — nothing else to type.</p>' +
-                    '<div class="field"><label>Enrollment payload <span class="muted">(the whole block from the app)</span></label>' +
-                    '<textarea name="enroll_payload" rows="3" placeholder="signed enrollment payload from the helper page"></textarea></div>' +
-                    '<details style="margin:6px 0 10px"><summary class="muted" style="cursor:pointer">Enter fields manually instead</summary>' +
-                    '<div class="field" style="margin-top:8px"><label>Helper URL</label>' +
-                    '<input name="helper_url" placeholder="https://app.mcnutt.cloud/srvmgr/helper.php"></div>' +
-                    '<div class="field"><label>Challenge key</label><input name="challenge" placeholder="XXXX-XXXX-XXXX-XXXX"></div></details>' +
-                    '<div class="field"><label>Name</label><input name="name" placeholder="My app"></div>' +
-                    '<div class="field"><label>Path</label><input name="path" value="/var/www/"></div>' +
-                    '<div class="field"><label>Health URL <span class="muted">(optional)</span></label>' +
-                    '<input name="health_url" placeholder="https://app.mcnutt.cloud/health"></div></div>',
+                    'It carries the helper URL, challenge and signing key — nothing else to type.</p>' +
+                    '<div class="field"><label>Enrollment payload</label>' +
+                    '<textarea name="enroll_payload" rows="3" placeholder="signed enrollment payload from the helper page"></textarea></div></div>',
                     (d, close) => {
-                        if (!d.enroll_payload && !d.challenge) { UI.toast('warn', 'Enrollment payload or challenge required'); return; }
-                        if (!d.path) { UI.toast('warn', 'Path required'); return; }
+                        if (!d.slug) { UI.toast('warn', 'Choose an app to pair'); return; }
+                        if (!d.enroll_payload) { UI.toast('warn', 'Enrollment payload required'); return; }
                         UI.toast('info', 'Pairing…', 'Verifying payload and contacting the app helper');
                         API.post('/apps/enroll', d).then((res) => {
-                            if (res.data.ok) { UI.toast('success', 'Paired', d.name || res.data.app && res.data.app.slug || 'app'); close(); Views.apps.load(); $('#discoverResults').empty(); }
+                            if (res.data.ok) { UI.toast('success', 'Paired', (res.data.app && res.data.app.slug) || d.slug); close(); Views.apps.load(); $('#discoverResults').empty(); }
                             else UI.toast('error', 'Pairing failed', res.data.error);
                         });
                     }, 'Pair');
-                // Selecting an existing registration pre-fills the pairing fields.
+                // Selecting a registration sets the slug the enrollment binds to.
                 $('#pairAppSelect').on('change', function () {
                     const app = apps.find((a) => String(a.id) === String($(this).val()));
-                    const $m = $(this).closest('.modal');
-                    if (!app) { $m.find('[name=slug]').val(''); return; }
-                    $m.find('[name=slug]').val(app.slug || '');
-                    $m.find('[name=name]').val(app.name || '');
-                    $m.find('[name=path]').val(app.path || '/var/www/');
-                    $m.find('[name=helper_url]').val(app.helper_url || '');
-                    $m.find('[name=health_url]').val(app.health_url || '');
+                    $(this).closest('.modal').find('[name=slug]').val(app ? (app.slug || '') : '');
                 });
                 $('#genCodeBtn').on('click', function () {
                     const $btn = $(this).prop('disabled', true).text('Generating…');
@@ -1680,13 +1751,94 @@
                 '<input id="runArgs" class="search" placeholder=\'args JSON e.g. {"service":"apache2"}\' style="flex:1">' +
                 '<button class="btn" id="runExec">▶ Execute</button></div>' +
                 '<div class="terminal" id="runOut">Ready. Select an action and execute.\n</div></div>' +
+                '<div class="card" style="margin-top:16px"><h3>Application commands <span class="sub">commands downstream apps expose through their helper</span></h3>' +
+                '<div class="toolbar"><select id="appCmdApp" style="min-width:200px"></select>' +
+                '<select id="appCmdKey" style="min-width:220px"><option value="">— select app —</option></select>' +
+                '<button class="btn" id="appCmdRun">▶ Run</button></div>' +
+                '<div id="appCmdDesc" class="muted" style="margin:2px 0 6px"></div>' +
+                '<div id="appCmdOut"></div></div>' +
                 '<div class="card" style="margin-top:16px"><h3>Execution history</h3><div id="runHistory"></div></div>'
             );
             API.get('/runner/actions').then((r) => {
                 $('#runAction').html(r.data.map((a) => '<option>' + H.esc(a) + '</option>').join(''));
             });
             $('#runExec').on('click', () => this.exec());
+            this.loadApps();
+            $('#appCmdApp').on('change', () => this.loadCommands());
+            $('#appCmdKey').on('change', () => this.describeCommand());
+            $('#appCmdRun').on('click', () => this.runAppCommand());
             this.history();
+        },
+        _appCommands: [],
+        loadApps() {
+            API.get('/apps').then((r) => {
+                const apps = (r.data || []).filter((a) => a && a.slug && a.helper_url);
+                $('#appCmdApp').html('<option value="">— select app —</option>' +
+                    apps.map((a) => '<option value="' + a.id + '">' + H.esc(a.name || a.slug) + '</option>').join(''));
+            });
+        },
+        loadCommands() {
+            const id = $('#appCmdApp').val();
+            this._appCommands = [];
+            $('#appCmdDesc').text('');
+            if (!id) { $('#appCmdKey').html('<option value="">— select app —</option>'); return; }
+            $('#appCmdKey').html('<option value="">loading…</option>');
+            API.get('/apps/' + id + '/commands').then((r) => {
+                const cmds = (r.data && r.data.commands) || [];
+                this._appCommands = cmds;
+                if (!cmds.length) {
+                    $('#appCmdKey').html('<option value="">— none declared —</option>');
+                    $('#appCmdDesc').text(r.data && r.data.error ? r.data.error : 'This app declares no commands.');
+                    return;
+                }
+                $('#appCmdKey').html('<option value="">— select command —</option>' +
+                    cmds.map((c) => '<option value="' + H.esc(c.key) + '">' + H.esc(c.name || c.key) + (c.dangerous ? ' ⚠' : '') + '</option>').join(''));
+            }).catch(() => { $('#appCmdKey').html('<option value="">— unavailable —</option>'); });
+        },
+        describeCommand() {
+            const key = $('#appCmdKey').val();
+            const cmd = this._appCommands.find((c) => c.key === key);
+            $('#appCmdDesc').text(cmd && cmd.description ? cmd.description : '');
+        },
+        runAppCommand() {
+            if (!SM.admin) { UI.toast('warn', 'Admin required'); return; }
+            const id = $('#appCmdApp').val();
+            const key = $('#appCmdKey').val();
+            if (!id || !key) { UI.toast('warn', 'Select an app and command'); return; }
+            const cmd = this._appCommands.find((c) => c.key === key) || { key: key, name: key, params: [] };
+            const params = Array.isArray(cmd.params) ? cmd.params : [];
+            const run = (args) => {
+                const $out = $('#appCmdOut');
+                $out.prepend($('<div class="terminal"></div>').append($('<div class="cmd"></div>').text('$ ' + key + ' ' + JSON.stringify(args || {}))));
+                const $term = $out.children().first();
+                API.post('/apps/' + id + '/command', { command: key, args: args || {} }).then((res) => {
+                    const r = res.data || {};
+                    if (r.ok) {
+                        const result = r.result || {};
+                        const out = result.output != null ? result.output : (result.message != null ? result.message : JSON.stringify(result, null, 2));
+                        $term.append($('<div class="ok"></div>').text('ok'));
+                        $term.append(document.createTextNode(String(out) + '\n'));
+                    } else {
+                        $term.append($('<div class="err"></div>').text(r.error || 'command failed'));
+                    }
+                }).catch(() => $term.append($('<div class="err"></div>').text('command failed')));
+            };
+            if (params.length) {
+                const fields = params.map((p) => '<div class="field"><label>' + H.esc(p.label || p.name) + (p.required ? ' *' : '') + '</label>' +
+                    (p.type === 'bool'
+                        ? '<select name="' + H.esc(p.name) + '"><option value="true"' + (p.default ? ' selected' : '') + '>true</option><option value="false"' + (!p.default ? ' selected' : '') + '>false</option></select>'
+                        : '<input name="' + H.esc(p.name) + '" value="' + H.esc(p.default != null ? String(p.default) : '') + '">') + '</div>').join('');
+                UI.modal(cmd.name || key, (cmd.description ? '<p class="muted">' + H.esc(cmd.description) + '</p>' : '') + fields, (d, close) => {
+                    const args = {};
+                    params.forEach((p) => { let v = d[p.name]; if (p.type === 'bool') { v = (v === 'true' || v === true); } args[p.name] = v; });
+                    close();
+                    run(args);
+                }, 'Run');
+            } else if (cmd.dangerous) {
+                UI.confirm('Run “' + (cmd.name || key) + '”?', () => run({}));
+            } else {
+                run({});
+            }
         },
         exec() {
             if (!SM.admin) { UI.toast('warn', 'Admin required'); return; }

@@ -18,7 +18,7 @@
  *     X-Srvmgr-Signature: v1=<base64url(hmac_sha256(secret, canonical))>
  *       canonical = "{timestamp}\n{nonce}\n{method}\n{path}\n{sha256(rawBody)}"
  *   (Legacy X-Srvmgr-Token: <shared secret> is still accepted as a fallback.)
- *   Body:   { "action": "health|stats|logs|version|clear_cache|maintenance|migrate|enroll", ... }
+ *   Body:   { "action": "health|stats|logs|version|components|commands|command|clear_cache|maintenance|migrate|enroll", ... }
  *   Reply:  { "ok": true, "data": { ... } }
  *
  * Gated pairing (air-tight, no secret to copy by hand):
@@ -716,6 +716,66 @@ switch ($action) {
         //     'level'  => 'info',
         // ];
         reply(['entries' => $entries]);
+
+    case 'components':
+        // Declare YOUR app's sub-processes / components. Each follows the
+        // common information model; only id/name/status are required. Server
+        // Manager renders whatever you return and lets any degraded/down
+        // component pull the app's overall health down. Delete the sample.
+        reply([
+            'components' => [
+                [
+                    'id'       => 'queue-worker',
+                    'name'     => 'Queue worker',
+                    'kind'     => 'process',   // process|service|worker|queue|datastore|integration|job|custom
+                    'status'   => 'ok',        // ok|healthy|degraded|down|unknown
+                    'summary'  => '3 running · 12 jobs/min',
+                    'metrics'  => ['workers' => 3, 'queue_depth' => 12],
+                    'commands' => ['worker.restart', 'worker.stats'],
+                ],
+            ],
+        ]);
+
+    case 'commands':
+        // Declare the commands Server Manager may invoke. You OWN this
+        // allow-list — only keys returned here can be run via `command`.
+        reply([
+            'commands' => [
+                [
+                    'key'         => 'worker.restart',
+                    'name'        => 'Restart worker',
+                    'description' => 'Gracefully restart the queue worker',
+                    'component'   => 'queue-worker',
+                    'dangerous'   => false,
+                    'params'      => [
+                        ['name' => 'graceful', 'type' => 'bool', 'label' => 'Graceful', 'default' => true],
+                    ],
+                ],
+                [
+                    'key'         => 'worker.stats',
+                    'name'        => 'Worker stats',
+                    'description' => 'Dump current worker statistics',
+                ],
+            ],
+        ]);
+
+    case 'command':
+        // Execute one declared command. ALWAYS re-check the command name here;
+        // never run anything you did not advertise in `commands`.
+        $command = (string) ($req['command'] ?? '');
+        $args    = is_array($req['args'] ?? null) ? $req['args'] : [];
+        switch ($command) {
+            case 'worker.restart':
+                $graceful = !empty($args['graceful']);
+                // TODO: restart your worker.
+                reply(['output' => 'worker restart requested (graceful=' . ($graceful ? 'yes' : 'no') . ')']);
+            case 'worker.stats':
+                // TODO: return real worker stats.
+                reply(['output' => "workers: 3\nqueue_depth: 12"]);
+            default:
+                reply(['error' => 'command not declared'], false, 400);
+        }
+        // every case above exits via reply()
 
     case 'clear_cache':
         // TODO: flush your app cache.

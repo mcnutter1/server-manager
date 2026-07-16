@@ -74,6 +74,9 @@ Rules:
 | `stats`       | —                   | app counters, e.g. `{ "users": 123, "sessions": 4 }`     |
 | `logs`        | `{ "lines": 200 }`  | `{ "entries": [ { "ip", "method", "path", "status", "bytes", "time" }, ... ] }` |
 | `version`     | —                   | `{ "version": "<git-sha or semver>" }`                   |
+| `components`  | —                   | `{ "components": [ { "id", "name", "status", ... }, ... ] }` — your custom health surface (see below) |
+| `commands`    | —                   | `{ "commands": [ { "key", "name", ... }, ... ] }` — CLI commands you allow (see below) |
+| `command`     | `{ "command", "args" }` | `{ "output": "…" }` — run one declared command (see below) |
 | `clear_cache` | —                   | `{ "cleared": true }`                                     |
 | `maintenance` | `{ "on": bool }`    | `{ "maintenance": true\|false }`                          |
 | `migrate`     | `{ "confirm": true }` | `{ "migrated": true, "applied": [...] }` — guard behind `confirm` |
@@ -98,6 +101,73 @@ Notes on `logs` (powers the Server Manager **traffic map**):
 
 Apps may define custom actions; unknown actions MUST return HTTP 400 with
 `{ "ok": false, "error": "unknown action" }`.
+
+## Extensible capabilities — your own components + commands
+
+The contract is intentionally open-ended. Beyond the fixed actions, each app
+declares **its own** health surface and command set through a common
+information model. Server Manager renders whatever you expose uniformly in the
+management UI, so you can surface exactly what matters to your app (workers,
+queues, integrations, datastores, cron jobs, …) and let operators run the
+operations you choose to allow.
+
+### `components` — your custom health surface
+
+Return the sub-processes / components your app runs. Only `id`, `name` and
+`status` are required; add whatever else is useful.
+
+```json
+{
+  "components": [
+    {
+      "id": "queue-worker",
+      "name": "Queue worker",
+      "kind": "process",            // process|service|worker|queue|datastore|integration|job|custom
+      "status": "ok",               // ok|healthy|degraded|down|unknown
+      "summary": "3 running · 12 jobs/min",
+      "metrics": { "workers": 3, "queue_depth": 12 },
+      "detail": "optional longer text",
+      "commands": ["worker.restart", "worker.stats"]
+    }
+  ]
+}
+```
+
+- `status` `ok`/`healthy` = healthy; `degraded`/`warning` = degraded;
+  `down`/`critical`/`failed` = down. Any degraded/down component pulls the app's
+  overall health down.
+- `metrics` must be a flat map of scalar values.
+- `commands` (optional) links this component to keys from your `commands` list,
+  so the UI shows those as buttons next to the component.
+
+### `commands` — CLI commands you allow
+
+Return the commands Server Manager may invoke on your app. **You own this
+allow-list** — only keys returned here can be run.
+
+```json
+{
+  "commands": [
+    {
+      "key": "worker.restart",
+      "name": "Restart worker",
+      "description": "Gracefully restart the queue worker",
+      "component": "queue-worker",
+      "dangerous": false,
+      "params": [
+        { "name": "graceful", "type": "bool", "label": "Graceful", "default": true }
+      ]
+    }
+  ]
+}
+```
+
+### `command` — execute one
+
+Server Manager sends `{ "action": "command", "command": "<key>",
+"args": { … } }`. Re-validate the command name against your allow-list, run it,
+and return `{ "output": "…" }` (or any `data` object). Reject anything you did
+not declare with HTTP 400.
 
 ## Gated pairing (recommended over sharing a secret by hand)
 

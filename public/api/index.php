@@ -312,6 +312,28 @@ $get('/apps/(?<id>\d+)/health', static function ($p) {
     Response::ok(AppManager::healthReport((int) $p['id']));
 });
 
+// App-declared components (extensible common-information-model health surface).
+$get('/apps/(?<id>\d+)/components', static function ($p) {
+    Auth::requirePrivileged('apps');
+    Response::ok(AppManager::components((int) $p['id']));
+});
+
+// App-declared CLI commands + invocation.
+$get('/apps/(?<id>\d+)/commands', static function ($p) {
+    Auth::requirePrivileged('apps');
+    Response::ok(AppManager::commands((int) $p['id']));
+});
+
+$post('/apps/(?<id>\d+)/command', static function ($p) use ($input) {
+    Auth::requirePrivileged('runner');
+    $res = AppManager::runCommand(
+        (int) $p['id'],
+        (string) ($input['command'] ?? ''),
+        is_array($input['args'] ?? null) ? $input['args'] : []
+    );
+    Response::json(['ok' => (bool) ($res['ok'] ?? false), 'data' => $res], ($res['ok'] ?? false) ? 200 : 400);
+});
+
 $post('/apps/(?<id>\d+)/helper', static function ($p) use ($input) {
     Auth::requirePrivileged('apps');
     $app = AppManager::find((int) $p['id']);

@@ -269,17 +269,32 @@ final class AppManager
         }
 
         // Register (or update) the app with the freshly claimed secret.
+        // Simplified pairing: the operator picks an already-registered app and
+        // supplies only the two keys (unlock token + enrollment payload). When
+        // a matching registration exists we reuse its path/name/etc. so no app
+        // details need to be retyped here; the secret + helper URL are the only
+        // things pairing adds.
+        $existing = null;
+        $slugHint = trim((string) ($input['slug'] ?? ''));
+        if ($slugHint !== '') {
+            $existing = self::findBySlug(self::slugify($slugHint));
+        }
+        if ($existing === null && $domain !== '') {
+            $existing = self::findBySlug(self::slugify($domain));
+        }
+
         $reg = self::register([
-            'name'         => $input['name'] ?? $domain,
-            'slug'         => $input['slug'] ?? ($input['name'] ?? $domain),
-            'path'         => $input['path'] ?? '',
+            'name'         => $input['name'] ?? ($existing['name'] ?? $domain),
+            'slug'         => $slugHint !== '' ? $slugHint : ($existing['slug'] ?? ($input['name'] ?? $domain)),
+            'path'         => $input['path'] ?? ($existing['path'] ?? ''),
             'domain'       => $domain,
             'helper_url'   => $base,
             'helper_token' => $secret,
-            'health_url'   => $input['health_url'] ?? null,
-            'repo_url'     => $input['repo_url'] ?? null,
-            'db_name'      => $input['db_name'] ?? null,
-            'description'  => $input['description'] ?? 'Paired via challenge enrollment',
+            'health_url'   => $input['health_url'] ?? ($existing['health_url'] ?? null),
+            'repo_url'     => $input['repo_url'] ?? ($existing['repo_url'] ?? null),
+            'db_name'      => $input['db_name'] ?? ($existing['db_name'] ?? null),
+            'service_name' => $existing['service_name'] ?? null,
+            'description'  => $input['description'] ?? ($existing['description'] ?? 'Paired via challenge enrollment'),
             'status'       => 'active',
         ]);
         if (empty($reg['ok'])) {
@@ -433,6 +448,28 @@ final class AppManager
             if ($stats['ok'] && is_array($stats['data']) && $stats['data']) {
                 $result['checks']['stats'] = $stats['data'];
             }
+
+            // Extensible component model: the app declares its own set of
+            // sub-processes / components (workers, queues, integrations, …)
+            // following a common information model. We store them so the UI
+            // can render each app's custom health surface uniformly, and let
+            // any down/degraded component pull the overall status down.
+            $components = self::callHelper($app, 'components');
+            if ($components['ok'] && is_array($components['data'])) {
+                $comp = self::normalizeComponents($components['data']);
+                if ($comp) {
+                    $result['checks']['components'] = $comp;
+                    foreach ($comp as $c) {
+                        if (in_array($c['status'], ['down', 'critical', 'unhealthy', 'failed'], true)) {
+                            $overall = 'unhealthy';
+                            break;
+                        }
+                        if (in_array($c['status'], ['degraded', 'warning'], true) && $overall === 'healthy') {
+                            $overall = 'degraded';
+                        }
+                    }
+                }
+            }
         } elseif (empty($app['health_url'])) {
             // No HTTP probe and the helper failed → surface the failure.
             $result['checks']['helper_error'] = $helperCall['error'] ?? 'helper unreachable';
@@ -442,11 +479,12 @@ final class AppManager
         // A quick summary of what this check actually covered.
         $result['checks']['summary'] = [
             'probes'     => array_values(array_intersect(
-                ['http', 'helper', 'version', 'stats'],
+                ['http', 'helper', 'version', 'stats', 'components'],
                 array_keys($result['checks'])
             )),
             'elements'   => is_array($helper) ? count($helper) : 0,
             'stat_keys'  => isset($result['checks']['stats']) ? count($result['checks']['stats']) : 0,
+            'components' => isset($result['checks']['components']) ? count($result['checks']['components']) : 0,
         ];
 
         $db = Database::instance();
@@ -577,7 +615,202 @@ final class AppManager
             ],
             'logs'    => $logs,
             'history' => self::healthHistory($id, $historyLimit),
+            // Commands this app declares it can run (extensible, app-defined).
+            // Surfaced so the UI can offer them as buttons on the report + in
+            // the CLI runner. Only queried for paired apps (helper reachable),
+            // empty otherwise so unpaired apps don't add helper latency.
+            'commands' => (!empty($app['helper_url']) && !empty($app['helper_token']))
+                ? (self::commands($id)['commands'] ?? [])
+                : [],
         ];
+    }
+
+    // -----------------------------------------------------------------
+    // Extensible capability model — components + app-declared commands
+    // -----------------------------------------------------------------
+    /**
+     * Fetch the components an application declares through its helper. Each app
+     * exposes its OWN set (workers, queues, integrations, datastores, …) that
+     * all follow one common information model, so the management UI can render
+     * any app's custom health surface uniformly.
+     *
+     * @return array{ok:bool, components:array<int,array>, error?:string}
+     */
+    public static function components(int $id): array
+    {
+        $app = self::find($id);
+        if (!$app) {
+            return ['ok' => false, 'error' => 'not found', 'components' => []];
+        }
+        $call = self::callHelper($app, 'components');
+        if (!($call['ok'] ?? false)) {
+            return ['ok' => false, 'error' => $call['error'] ?? 'helper unreachable', 'components' => []];
+        }
+        return ['ok' => true, 'components' => self::normalizeComponents($call['data'] ?? [])];
+    }
+
+    /**
+     * Fetch the CLI commands an application declares through its helper. Each
+     * command is app-defined (e.g. a worker's `restart` / `stats`) and can be
+     * invoked through this platform's CLI runner + UI.
+     *
+     * @return array{ok:bool, commands:array<int,array>, error?:string}
+     */
+    public static function commands(int $id): array
+    {
+        $app = self::find($id);
+        if (!$app) {
+            return ['ok' => false, 'error' => 'not found', 'commands' => []];
+        }
+        $call = self::callHelper($app, 'commands');
+        if (!($call['ok'] ?? false)) {
+            return ['ok' => false, 'error' => $call['error'] ?? 'helper unreachable', 'commands' => []];
+        }
+        return ['ok' => true, 'commands' => self::normalizeCommands($call['data'] ?? [])];
+    }
+
+    /**
+     * Invoke an app-declared command through its helper. The command MUST be
+     * one the app itself declares (the app owns the allow-list), so this
+     * platform never invents commands an app did not opt into.
+     *
+     * @return array{ok:bool, command?:string, result?:array, error?:string}
+     */
+    public static function runCommand(int $id, string $command, array $args = []): array
+    {
+        $app = self::find($id);
+        if (!$app) {
+            return ['ok' => false, 'error' => 'not found'];
+        }
+        $command = trim($command);
+        if ($command === '') {
+            return ['ok' => false, 'error' => 'command required'];
+        }
+
+        $declared = self::commands($id);
+        $keys = array_column($declared['commands'] ?? [], 'key');
+        if (!in_array($command, $keys, true)) {
+            return ['ok' => false, 'error' => 'command not declared by app'];
+        }
+
+        $call = self::callHelper($app, 'command', ['command' => $command, 'args' => $args]);
+        AuditLogger::log('app.command', $app['slug'], ['command' => $command, 'ok' => (bool) ($call['ok'] ?? false)]);
+        if (!($call['ok'] ?? false)) {
+            return ['ok' => false, 'command' => $command, 'error' => $call['error'] ?? 'command failed'];
+        }
+        return ['ok' => true, 'command' => $command, 'result' => $call['data'] ?? []];
+    }
+
+    /** Normalise an app's `components` payload to the common information model. */
+    private static function normalizeComponents(mixed $data): array
+    {
+        $list = [];
+        if (is_array($data)) {
+            if (isset($data['components']) && is_array($data['components'])) {
+                $list = $data['components'];
+            } elseif (self::isList($data)) {
+                $list = $data;
+            }
+        }
+
+        $out = [];
+        foreach ($list as $i => $c) {
+            if (!is_array($c)) {
+                continue;
+            }
+            $cid    = (string) ($c['id'] ?? $c['key'] ?? $c['name'] ?? ('component-' . $i));
+            $status = strtolower(trim((string) ($c['status'] ?? 'unknown')));
+
+            $metrics = [];
+            if (isset($c['metrics']) && is_array($c['metrics'])) {
+                foreach ($c['metrics'] as $k => $v) {
+                    if (is_scalar($v) || $v === null) {
+                        $metrics[(string) $k] = $v;
+                    }
+                }
+            }
+
+            $cmds = [];
+            if (isset($c['commands']) && is_array($c['commands'])) {
+                foreach ($c['commands'] as $k) {
+                    if (is_string($k) || is_int($k)) {
+                        $cmds[] = (string) $k;
+                    }
+                }
+            }
+
+            $out[] = [
+                'id'       => $cid,
+                'name'     => (string) ($c['name'] ?? $cid),
+                'kind'     => strtolower((string) ($c['kind'] ?? $c['type'] ?? 'custom')),
+                'status'   => $status !== '' ? $status : 'unknown',
+                'summary'  => isset($c['summary']) ? (string) $c['summary'] : '',
+                'metrics'  => $metrics,
+                'detail'   => isset($c['detail']) ? (string) $c['detail'] : '',
+                'commands' => $cmds,
+            ];
+        }
+        return $out;
+    }
+
+    /** Normalise an app's `commands` payload to the common information model. */
+    private static function normalizeCommands(mixed $data): array
+    {
+        $list = [];
+        if (is_array($data)) {
+            if (isset($data['commands']) && is_array($data['commands'])) {
+                $list = $data['commands'];
+            } elseif (self::isList($data)) {
+                $list = $data;
+            }
+        }
+
+        $out = [];
+        foreach ($list as $c) {
+            if (is_string($c)) {
+                $c = ['key' => $c];
+            }
+            if (!is_array($c)) {
+                continue;
+            }
+            $key = trim((string) ($c['key'] ?? $c['id'] ?? $c['name'] ?? ''));
+            if ($key === '') {
+                continue;
+            }
+
+            $params = [];
+            if (isset($c['params']) && is_array($c['params'])) {
+                foreach ($c['params'] as $pn => $pd) {
+                    if (is_array($pd)) {
+                        $params[] = [
+                            'name'     => (string) ($pd['name'] ?? $pn),
+                            'type'     => (string) ($pd['type'] ?? 'string'),
+                            'label'    => (string) ($pd['label'] ?? $pd['name'] ?? $pn),
+                            'default'  => $pd['default'] ?? null,
+                            'required' => (bool) ($pd['required'] ?? false),
+                        ];
+                    } elseif (is_string($pd)) {
+                        $params[] = ['name' => $pd, 'type' => 'string', 'label' => $pd, 'default' => null, 'required' => false];
+                    }
+                }
+            }
+
+            $out[] = [
+                'key'         => $key,
+                'name'        => (string) ($c['name'] ?? $key),
+                'description' => (string) ($c['description'] ?? ''),
+                'component'   => isset($c['component']) ? (string) $c['component'] : null,
+                'dangerous'   => (bool) ($c['dangerous'] ?? false),
+                'params'      => $params,
+            ];
+        }
+        return $out;
+    }
+
+    /** True when the array is a 0-indexed list (PHP 8.0-safe array_is_list). */
+    private static function isList(array $a): bool
+    {
+        return $a === [] || array_keys($a) === range(0, count($a) - 1);
     }
 
     private static function httpProbe(string $url): array

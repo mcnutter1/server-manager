@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Server Manager App Helper Contract",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Uniform helper/health endpoint every managed application exposes so Server Manager can interface with it. Full instructions: /integrate/llms.txt",
   "transport": {
     "method": "POST",
@@ -111,6 +111,93 @@
         "type": "object",
         "properties": { "version": { "type": "string" } }
       }
+    },
+    "components": {
+      "required": false,
+      "description": "App-declared health surface following a common information model. Each app exposes its OWN set of sub-processes/components (workers, queues, integrations, datastores, jobs, …); Server Manager renders them uniformly and lets any degraded/down component pull overall health down. Stored with each health check.",
+      "params": {},
+      "data": {
+        "type": "object",
+        "required": ["components"],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "name", "status"],
+              "properties": {
+                "id": { "type": "string", "description": "stable component id" },
+                "name": { "type": "string" },
+                "kind": { "type": "string", "description": "process|service|worker|queue|datastore|integration|job|custom" },
+                "status": { "enum": ["ok", "healthy", "degraded", "warning", "down", "critical", "failed", "unknown"] },
+                "summary": { "type": "string" },
+                "metrics": { "type": "object", "description": "flat map of scalar values" },
+                "detail": { "type": "string" },
+                "commands": { "type": "array", "items": { "type": "string" }, "description": "keys from the commands action tied to this component" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "commands": {
+      "required": false,
+      "description": "App-declared CLI commands Server Manager may invoke. The app OWNS this allow-list; only keys returned here can be run via the command action.",
+      "params": {},
+      "data": {
+        "type": "object",
+        "required": ["commands"],
+        "properties": {
+          "commands": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["key"],
+              "properties": {
+                "key": { "type": "string", "description": "stable command id, e.g. worker.restart" },
+                "name": { "type": "string" },
+                "description": { "type": "string" },
+                "component": { "type": "string", "description": "optional component id this command applies to" },
+                "dangerous": { "type": "boolean", "description": "true => the UI confirms before running" },
+                "params": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                      "name": { "type": "string" },
+                      "type": { "type": "string", "description": "string|bool|number" },
+                      "label": { "type": "string" },
+                      "default": {},
+                      "required": { "type": "boolean" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "command": {
+      "required": false,
+      "description": "Execute one command previously declared by the commands action. The helper MUST re-validate the command name against its own allow-list.",
+      "params": {
+        "type": "object",
+        "required": ["command"],
+        "properties": {
+          "command": { "type": "string", "description": "a key from the commands action" },
+          "args": { "type": "object", "description": "command-specific arguments" }
+        }
+      },
+      "data": {
+        "type": "object",
+        "description": "command-specific result",
+        "properties": {
+          "output": { "type": "string", "description": "human-readable output (rendered verbatim in the UI)" }
+        }
+      },
+      "errors": { "command not declared": 400 }
     },
     "clear_cache": {
       "required": false,
