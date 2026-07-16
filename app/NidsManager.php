@@ -306,6 +306,21 @@ final class NidsManager
             [$ip]
         ) ?? [];
 
+        // Threat-intel is optional and must never break the dossier — if the
+        // ip_reputation table is missing (migration not yet applied) or a feed
+        // errors, degrade to an "unavailable" verdict instead of a 500.
+        try {
+            $intel = ThreatIntel::lookup($ip);
+        } catch (\Throwable $e) {
+            error_log('[nids] threat-intel lookup failed for ' . $ip . ': ' . $e->getMessage());
+            $intel = [
+                'ip_address' => $ip, 'is_malicious' => false, 'score' => 0,
+                'total_reports' => 0, 'categories' => null, 'sources' => [],
+                'usage_type' => null, 'status' => 'error',
+                'last_listed_at' => null, 'checked_at' => null, 'stale' => false,
+            ];
+        }
+
         return [
             'ok'          => true,
             'ip'          => $ip,
@@ -333,7 +348,7 @@ final class NidsManager
                 'recent'      => $recentEvents,
                 'auth'        => $auth,
             ],
-            'intel'       => ThreatIntel::lookup($ip),
+            'intel'       => $intel,
         ];
     }
 

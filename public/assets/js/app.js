@@ -498,6 +498,8 @@
                 html += '<p class="muted">Private / internal address \u2014 not checked against public feeds.</p>';
             } else if (intel.status === 'disabled') {
                 html += '<p class="muted">Threat-intel lookups are disabled in config.</p>';
+            } else if (intel.status === 'error') {
+                html += '<p class="muted">Threat-intel unavailable \u2014 run <code>php bin/migrate.php</code> to create the reputation table, then Re-check.</p>';
             } else if (srcs.length) {
                 html += '<div class="intel-grid">' + srcs.map((s) => {
                     if (s.provider === 'AbuseIPDB') {
