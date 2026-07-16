@@ -75,9 +75,10 @@
             $('#toasts').append($t);
             setTimeout(() => $t.fadeOut(200, () => $t.remove()), 4200);
         },
-        modal(title, contentHtml, onSubmit, submitLabel) {
+        modal(title, contentHtml, onSubmit, submitLabel, opts) {
+            opts = opts || {};
             const $bk = $('<div class="modal-backdrop"></div>');
-            const $m = $('<div class="modal"></div>')
+            const $m = $('<div class="modal' + (opts.size === 'wide' ? ' modal-wide' : '') + '"></div>')
                 .append($('<h3></h3>').text(title))
                 .append($('<div class="modal-body"></div>').html(contentHtml))
                 .append(
@@ -315,12 +316,13 @@
         },
         load() {
             API.get('/nids/stats').then((r) => {
-                const n = r.data;
+                const n = r.data, ti = n.threat_intel || {};
                 $('#nidsStats').html(
                     statBox('Active blocks', n.active_blocks) +
                     statBox('Permanent', n.permanent) +
                     statBox('Events 24h', n.events_24h) +
-                    statBox('Critical 24h', n.critical_24h, n.critical_24h > 0 ? 'crit' : '')
+                    statBox('Critical 24h', n.critical_24h, n.critical_24h > 0 ? 'crit' : '') +
+                    statBox('Malicious IPs', ti.malicious_known || 0, (ti.malicious_known || 0) > 0 ? 'crit' : '')
                 );
             });
             UI.loading($('#blocksTable'));
@@ -328,7 +330,7 @@
                 $('#blocksTable').html('<div class="table-wrap"><table class="data"><thead><tr>' +
                     '<th>IP</th><th>Reason</th><th>Source</th><th>Hits</th><th>Expires</th><th>By</th>' + (SM.admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
                     (r.data.length ? r.data.map((b) => (
-                        '<tr><td class="mono">' + H.esc(b.ip_address) + '</td>' +
+                        '<tr class="clickable" data-nidsip="' + H.esc(b.ip_address) + '"><td class="mono">' + H.esc(b.ip_address) + '</td>' +
                         '<td>' + H.esc(b.reason || '—') + '</td>' +
                         '<td><span class="badge info">' + H.esc(b.source) + '</span></td>' +
                         '<td class="mono">' + (b.hits || 0).toLocaleString() + '</td>' +
@@ -338,7 +340,9 @@
                         '</tr>'
                     )).join('') : '<tr><td colspan="7" class="muted">no active blocks</td></tr>') +
                     '</tbody></table></div>');
-                $('#blocksTable [data-unblock]').on('click', function () {
+                $('#blocksTable tr[data-nidsip]').on('click', function () { Views.nids.openIp($(this).data('nidsip')); });
+                $('#blocksTable [data-unblock]').on('click', function (e) {
+                    e.stopPropagation();
                     const ip = $(this).data('unblock');
                     UI.confirm('Unblock ' + ip + '?', () => API.post('/nids/unblock', { ip: ip }).then(() => {
                         UI.toast('success', 'Unblocked', ip); Views.nids.load();
@@ -348,12 +352,14 @@
             API.get('/nids/offenders').then((r) => {
                 $('#offenders').html('<div class="table-wrap"><table class="data"><thead><tr><th>IP</th><th>Events</th><th>Worst</th><th>Last</th>' + (SM.admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
                     r.data.map((o) => (
-                        '<tr><td class="mono">' + H.esc(o.src_ip) + '</td><td>' + o.events + '</td>' +
+                        '<tr class="clickable" data-nidsip="' + H.esc(o.src_ip) + '"><td class="mono">' + H.esc(o.src_ip) + '</td><td>' + o.events + '</td>' +
                         '<td><span class="badge ' + H.esc(o.worst) + '">' + H.esc(o.worst) + '</span></td>' +
                         '<td class="muted">' + H.ago(o.last_seen) + '</td>' +
                         (SM.admin ? '<td style="text-align:right"><button class="btn small danger" data-quickblock="' + H.esc(o.src_ip) + '">Block</button></td>' : '') + '</tr>'
                     )).join('') + '</tbody></table></div>');
-                $('#offenders [data-quickblock]').on('click', function () {
+                $('#offenders tr[data-nidsip]').on('click', function () { Views.nids.openIp($(this).data('nidsip')); });
+                $('#offenders [data-quickblock]').on('click', function (e) {
+                    e.stopPropagation();
                     const ip = $(this).data('quickblock');
                     API.post('/nids/block', { ip: ip, reason: 'Manual block from offenders', minutes: 60, source: 'manual' })
                         .then(() => { UI.toast('success', 'Blocked', ip); Views.nids.load(); });
@@ -362,9 +368,10 @@
             API.get('/nids/events?limit=40').then((r) => {
                 $('#nidsEvents').html('<div class="table-wrap"><table class="data"><thead><tr><th>Time</th><th>Src</th><th>Category</th><th>Sev</th></tr></thead><tbody>' +
                     r.data.map((e) => (
-                        '<tr><td class="muted">' + H.ago(e.created_at) + '</td><td class="mono">' + H.esc(e.src_ip) + '</td>' +
+                        '<tr class="clickable" data-nidsip="' + H.esc(e.src_ip) + '"><td class="muted">' + H.ago(e.created_at) + '</td><td class="mono">' + H.esc(e.src_ip) + '</td>' +
                         '<td>' + H.esc(e.category) + '</td><td><span class="badge ' + H.esc(e.severity) + '">' + H.esc(e.severity) + '</span></td></tr>'
                     )).join('') + '</tbody></table></div>');
+                $('#nidsEvents tr[data-nidsip]').on('click', function () { Views.nids.openIp($(this).data('nidsip')); });
             });
             this.loadNeverBlock();
         },
@@ -395,6 +402,185 @@
                     }));
                 });
             });
+        },
+        // ---- IP dossier drill-down -----------------------------------
+        openIp(ip) { if (ip) { this.drill.open(ip); } },
+        drill: {
+            _bk: null, _ip: null, _data: null,
+            open(ip) { this._ip = ip; this.ensure(); this.render(); },
+            close() { if (this._bk) { this._bk.remove(); this._bk = null; } this._ip = null; this._data = null; },
+            ensure() {
+                if (this._bk) { return; }
+                const self = this;
+                const $bk = $('<div class="modal-backdrop"></div>');
+                const $m = $('<div class="modal drill-modal"></div>')
+                    .append('<div class="drill-head"><h3 id="nidsDrillTitle"></h3><button class="btn ghost sm" id="nidsDrillClose">\u2715</button></div>')
+                    .append('<div class="modal-body" id="nidsDrillBody"></div>');
+                $bk.append($m).on('click', (e) => { if (e.target === $bk[0]) { self.close(); } });
+                $('body').append($bk);
+                this._bk = $bk;
+                $m.on('click', '#nidsDrillClose', () => self.close());
+                $m.on('click', '[data-nidsblock]', function () {
+                    const ip = String($(this).data('nidsblock'));
+                    API.post('/nids/block', { ip: ip, reason: 'Manual block from dossier', minutes: 60, source: 'manual' })
+                        .then((res) => {
+                            if (res.data.ok) { UI.toast('success', 'Blocked', ip); Views.nids.load(); self.render(); }
+                            else UI.toast('error', 'Block failed', res.data.error);
+                        });
+                });
+                $m.on('click', '[data-nidsunblock]', function () {
+                    const ip = String($(this).data('nidsunblock'));
+                    UI.confirm('Unblock ' + ip + '?', () => API.post('/nids/unblock', { ip: ip }).then(() => {
+                        UI.toast('success', 'Unblocked', ip); Views.nids.load(); self.render();
+                    }));
+                });
+                $m.on('click', '#nidsRecheck', function () {
+                    const ip = self._ip;
+                    UI.toast('info', 'Querying threat feeds\u2026', ip);
+                    API.post('/nids/ip/recheck', { ip: ip }).then(() => { UI.toast('success', 'Re-checked', ip); self.render(); })
+                        .catch(() => UI.toast('error', 'Re-check failed', ip));
+                });
+            },
+            render() {
+                const self = this, ip = this._ip;
+                $('#nidsDrillTitle').text('IP \u00b7 ' + ip);
+                const $b = $('#nidsDrillBody'); UI.loading($b);
+                API.get('/nids/ip?ip=' + encodeURIComponent(ip) + '&hours=24')
+                    .then((r) => { self._data = r.data; $b.html(Views.nids.renderDossier(r.data)); })
+                    .catch(() => $b.html('<p class="muted">failed to load</p>'));
+            }
+        },
+        renderDossier(d) {
+            const V = Views.traffic;
+            const g = d.geo || {}, a = d.activity || {}, intel = d.intel || {}, ev = d.events || {}, es = ev.summary || {};
+            const loc = [g.city, g.region, g.country].filter(Boolean).map(H.esc).join(', ') || '\u2014';
+            const net = [];
+            if (g.is_datacenter) { net.push('data center'); }
+            if (g.is_proxy) { net.push('proxy / VPN'); }
+            if (g.is_mobile) { net.push('mobile carrier'); }
+
+            let intelBadge;
+            if (intel.status === 'private') { intelBadge = '<span class="badge clean">private / internal</span>'; }
+            else if (intel.status === 'disabled') { intelBadge = '<span class="badge">intel disabled</span>'; }
+            else if (intel.is_malicious) { intelBadge = '<span class="badge failed">malicious \u00b7 score ' + Number(intel.score || 0) + '</span>'; }
+            else if (Number(intel.score) > 0) { intelBadge = '<span class="badge flag">suspicious \u00b7 score ' + Number(intel.score) + '</span>'; }
+            else if ((intel.sources || []).length || intel.checked_at) { intelBadge = '<span class="badge clean">no listings</span>'; }
+            else { intelBadge = '<span class="badge">not checked</span>'; }
+
+            const statusBadges =
+                (d.blocked_now ? '<span class="badge failed">blocked now</span> ' : '') +
+                (d.whitelisted ? '<span class="badge active">never-block</span> ' : '');
+
+            const actions = SM.admin
+                ? '<div class="drill-actions">' +
+                    (d.blocked_now
+                        ? '<button class="btn small ghost" data-nidsunblock="' + H.esc(d.ip) + '">Unblock</button>'
+                        : (d.whitelisted ? '' : '<button class="btn small danger" data-nidsblock="' + H.esc(d.ip) + '">Block 60m</button>')) +
+                    '<button class="btn small ghost" id="nidsRecheck">\u21bb Re-check threat feeds</button>' +
+                  '</div>'
+                : '';
+
+            let html = actions + '<div class="drill-meta">' +
+                V.metaCell('IP', '<span class="mono">' + H.esc(d.ip) + '</span> ' + statusBadges) +
+                V.metaCell('Location', loc) +
+                V.metaCell('ISP / network', H.esc(g.isp || '\u2014') + (g.org && g.org !== g.isp ? '<div class="muted" style="font-size:12px">' + H.esc(g.org) + '</div>' : '')) +
+                V.metaCell('ASN', H.esc(g.asn || '\u2014')) +
+                V.metaCell('Network type', net.length ? net.map(H.esc).join(', ') : 'residential / other') +
+                V.metaCell('Threat intel', intelBadge) +
+                V.metaCell('NIDS events', (es.events || 0).toLocaleString() + (es.severe ? ' \u00b7 <span class="badge crit">' + es.severe + ' severe</span>' : '') + (es.auth_events ? ' \u00b7 ' + es.auth_events + ' auth' : '')) +
+                V.metaCell('Traffic', (a.requests || 0).toLocaleString() + ' reqs \u00b7 ' + H.bytes(a.bytes) + (a.blocked_bytes ? ' \u00b7 ' + H.bytes(a.blocked_bytes) + ' blocked' : '')) +
+                '</div>';
+
+            // Threat intelligence.
+            html += '<div class="drill-section"><h4>Threat intelligence' + (intel.checked_at ? ' <span class="sub">checked ' + H.ago(intel.checked_at) + (intel.stale ? ' \u00b7 stale' : '') + '</span>' : '') + '</h4>';
+            const srcs = intel.sources || [];
+            if (intel.status === 'private') {
+                html += '<p class="muted">Private / internal address \u2014 not checked against public feeds.</p>';
+            } else if (intel.status === 'disabled') {
+                html += '<p class="muted">Threat-intel lookups are disabled in config.</p>';
+            } else if (srcs.length) {
+                html += '<div class="intel-grid">' + srcs.map((s) => {
+                    if (s.provider === 'AbuseIPDB') {
+                        return '<div class="intel-src bad"><div class="isrc-name">AbuseIPDB</div>' +
+                            '<div class="isrc-detail">confidence ' + Number(s.confidence || 0) + '% \u00b7 ' + Number(s.reports || 0) + ' reports' +
+                            (s.usage_type ? ' \u00b7 ' + H.esc(s.usage_type) : '') +
+                            (s.last_report ? ' \u00b7 last ' + H.ago(s.last_report) : '') + '</div></div>';
+                    }
+                    return '<div class="intel-src bad"><div class="isrc-name">' + H.esc(s.provider || 'DNSBL') + '</div>' +
+                        '<div class="isrc-detail">listed' + (s.zone ? ' <span class="muted">(' + H.esc(s.zone) + ')</span>' : '') + '</div></div>';
+                }).join('') + '</div>' +
+                (intel.categories ? '<p class="muted" style="margin:8px 0 0">Categories: ' + H.esc(intel.categories) + '</p>' : '');
+            } else {
+                html += '<p class="muted">No listings on any configured threat database' + (intel.checked_at ? '.' : ' yet \u2014 use Re-check to query the feeds now.') + '</p>';
+            }
+            html += '</div>';
+
+            // Block history.
+            html += '<div class="drill-section"><h4>Block history <span class="sub">why this IP was blocked</span></h4>';
+            if ((d.blocks || []).length) {
+                html += '<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>When</th><th>Reason</th><th>Source</th><th>By</th><th>State</th><th>Expiry</th></tr></thead><tbody>' +
+                    d.blocks.map((b) => (
+                        '<tr' + (b.active ? ' class="err"' : '') + '><td class="muted">' + H.ago(b.blocked_at) + '</td>' +
+                        '<td>' + H.esc(b.reason || '\u2014') + '</td>' +
+                        '<td><span class="badge info">' + H.esc(b.source || '\u2014') + '</span></td>' +
+                        '<td class="muted">' + H.esc(b.created_by || '\u2014') + '</td>' +
+                        '<td>' + (b.active ? '<span class="badge failed">active</span>' : '<span class="badge">lifted</span>') + '</td>' +
+                        '<td>' + (b.permanent ? '<span class="badge failed">permanent</span>' : (b.remaining_seconds != null ? H.dur(b.remaining_seconds) : (b.unblocked_at ? 'unblocked ' + H.ago(b.unblocked_at) : '\u2014'))) + '</td></tr>'
+                    )).join('') +
+                    '</tbody></table></div>';
+            } else {
+                html += '<p class="muted">This IP has never been blocked.</p>';
+            }
+            html += '</div>';
+
+            // NIDS behaviour by category.
+            html += V.miniTable('Behaviour by category', ev.by_category, [['source', 'Source'], ['category', 'Category'], ['severity', 'Severity'], ['hits', 'Hits', 'num'], ['events', 'Events', 'num'], ['last_seen', 'Last', 'ago']], 'no NIDS events recorded');
+
+            // Authentication attempts.
+            const auth = ev.auth || [];
+            html += '<div class="drill-section"><h4>Authentication attempts <span class="sub">SSH / login</span></h4>';
+            if (auth.length) {
+                html += '<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Time</th><th>Category</th><th>Sev</th><th>Port</th><th>Log line</th></tr></thead><tbody>' +
+                    auth.map((e) => (
+                        '<tr><td class="muted">' + H.ago(e.created_at) + '</td>' +
+                        '<td>' + H.esc(e.category || '\u2014') + (Number(e.count) > 1 ? ' <span class="muted">\u00d7' + Number(e.count) + '</span>' : '') + '</td>' +
+                        '<td><span class="badge ' + H.esc(e.severity || '') + '">' + H.esc(e.severity || '\u2014') + '</span></td>' +
+                        '<td class="mono">' + H.esc(e.dst_port || '\u2014') + '</td>' +
+                        '<td class="errline" title="' + H.esc(e.raw || '') + '">' + (e.raw ? H.esc(String(e.raw)) : '<span class="em">\u2014</span>') + '</td></tr>'
+                    )).join('') +
+                    '</tbody></table></div>';
+            } else {
+                html += '<p class="muted">No authentication attempts recorded from this IP.</p>';
+            }
+            html += '</div>';
+
+            // Ports, services/apps, endpoints (shared traffic shapes).
+            html += V.miniTable('Ports probed', d.ports, [['port', 'Port'], ['category', 'Category'], ['severity', 'Severity'], ['hits', 'Hits', 'num'], ['last_seen', 'Last', 'ago']], 'no port-level activity recorded');
+            html += V.miniTable('Applications / services accessed', d.services, [['service', 'Service'], ['requests', 'Reqs', 'num'], ['bytes', 'Volume', 'bytes'], ['errors', 'Errors', 'num']], 'no application traffic');
+            html += V.miniTable('Top endpoints', d.endpoints, [['method', 'Method'], ['path', 'Path'], ['status', 'Status'], ['requests', 'Reqs', 'num'], ['bytes', 'Volume', 'bytes']], 'no endpoints recorded');
+
+            // Recent NIDS event timeline.
+            const rev = ev.recent || [];
+            if (rev.length) {
+                html += '<div class="drill-section"><h4>Recent NIDS events</h4><div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Time</th><th>Source</th><th>Category</th><th>Sev</th><th>Detail</th></tr></thead><tbody>' +
+                    rev.map((e) => (
+                        '<tr><td class="muted">' + H.ago(e.created_at) + '</td>' +
+                        '<td class="mono">' + H.esc(e.source || '\u2014') + '</td>' +
+                        '<td>' + H.esc(e.category || '\u2014') + '</td>' +
+                        '<td><span class="badge ' + H.esc(e.severity || '') + '">' + H.esc(e.severity || '\u2014') + '</span></td>' +
+                        '<td class="errline" title="' + H.esc(e.raw || '') + '">' + H.esc(e.signature || e.raw || '\u2014') + '</td></tr>'
+                    )).join('') +
+                    '</tbody></table></div></div>';
+            }
+
+            // Recent per-app request lines.
+            if (d.recent && d.recent.length) {
+                html += V.miniTable('Recent requests', d.recent, [['at', 'Time', 'ago'], ['method', 'Method'], ['path', 'Path'], ['status_code', 'Status'], ['bytes', 'Bytes', 'bytes']]);
+            }
+            return html;
         },
         neverBlockModal() {
             UI.modal('Add to never-block list',
@@ -824,17 +1010,54 @@
                 '</tbody></table></div></div>';
             return html;
         },
+        // Colored badge for an HTTP status code (2xx green … 5xx red).
+        scBadge(code) {
+            const n = Number(code);
+            if (!n) { return '<span class="badge">—</span>'; }
+            const cls = n >= 500 ? 'sc5' : n >= 400 ? 'sc4' : n >= 300 ? 'sc3' : 'sc2';
+            return '<span class="badge ' + cls + '">' + H.esc(String(n)) + '</span>';
+        },
         renderAppDetail(d) {
             const a = d.activity || {}, m = d.meta || null;
             const rows = d.sources || [];
+            const errs = d.errors || [];
+            const codes = d.status_codes || [];
             let html = '<div class="drill-meta">' +
                 this.metaCell('Application', H.esc(d.app || 'server') + (m && m.status ? ' <span class="badge ' + H.esc(m.status) + '">' + H.esc(m.status) + '</span>' : '')) +
                 this.metaCell('Domain', H.esc((m && m.domain) || '—')) +
                 this.metaCell('Health', m && m.last_health ? '<span class="badge ' + H.esc(m.last_health) + '">' + H.esc(m.last_health) + '</span>' : '—') +
                 this.metaCell('Source IPs', (a.sources || 0).toLocaleString()) +
-                this.metaCell('Activity', (a.requests || 0).toLocaleString() + ' reqs · ' + H.bytes(a.bytes) + (a.errors ? ' · ' + a.errors + ' err' : '')) +
-                this.metaCell('Window', (d.window_hours || 24) + 'h' + (a.last_seen ? ' · last ' + H.ago(a.last_seen) : '')) +
+                this.metaCell('Activity', (a.requests || 0).toLocaleString() + ' reqs · ' + H.bytes(a.bytes)) +
+                this.metaCell('Errors', (a.errors ? '<span class="badge sc5">' + Number(a.errors).toLocaleString() + '</span>' : '<span class="badge sc2">0</span>') + (a.last_seen ? ' <span class="muted">· last ' + H.ago(a.last_seen) + '</span>' : '')) +
                 '</div>';
+
+            // Status-code distribution — quick health signal for the app.
+            if (codes.length) {
+                html += '<div class="drill-section"><h4>Status codes <span class="sub">' + (d.window_hours || 24) + 'h</span></h4><div class="sc-row">' +
+                    codes.map((c) => this.scBadge(c.status_code) + ' <span class="muted" style="margin-right:12px">×' + Number(c.hits).toLocaleString() + '</span>').join('') +
+                    '</div></div>';
+            }
+
+            // Errors & warnings — the actual message text so you can see WHAT failed.
+            html += '<div class="drill-section"><h4>Errors &amp; warnings <span class="sub">last ' + (d.window_hours || 24) + 'h</span></h4>';
+            if (errs.length) {
+                html += '<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Time</th><th>Status</th><th>Method</th><th>Path</th><th>Detail</th></tr></thead><tbody>' +
+                    errs.map((e) => (
+                        '<tr class="err"><td class="muted">' + H.ago(e.at) + '</td>' +
+                        '<td>' + (e.status_code != null ? this.scBadge(e.status_code) : (e.level ? '<span class="badge sc4">' + H.esc(String(e.level)) + '</span>' : '—')) + '</td>' +
+                        '<td class="mono">' + H.esc(e.method || '—') + '</td>' +
+                        '<td class="mono" title="' + H.esc(e.path || '') + '">' + H.esc(e.path || '—') + '</td>' +
+                        '<td class="errline">' + (e.message ? H.esc(String(e.message)) : '<span class="em">no message</span>') +
+                        (e.src_ip ? ' <span class="em">· ' + H.esc(e.src_ip) + '</span>' : '') + '</td></tr>'
+                    )).join('') +
+                    '</tbody></table></div>';
+            } else {
+                html += '<p class="muted">No errors or warnings logged in this window' +
+                    (m ? '.' : ' (this app has no structured log feed — wire the helper’s <code>logs</code> action to capture error detail).') + '</p>';
+            }
+            html += '</div>';
+
             html += '<div class="drill-section"><h4>Top source IPs <span class="sub">click an IP for services · ports · apps</span></h4>' +
                 '<div class="table-wrap"><table class="data"><thead><tr>' +
                 '<th>IP</th><th>Location</th><th>ISP</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
@@ -849,7 +1072,18 @@
             html += this.miniTable('By country', d.countries, [['country', 'Country'], ['sources', 'IPs', 'num'], ['requests', 'Reqs', 'num'], ['bytes', 'Volume', 'bytes']], 'no country data');
             html += this.miniTable('Top endpoints', d.endpoints, [['method', 'Method'], ['path', 'Path'], ['status', 'Status'], ['requests', 'Reqs', 'num'], ['bytes', 'Volume', 'bytes']], 'no endpoints recorded');
             if (d.recent && d.recent.length) {
-                html += this.miniTable('Recent requests', d.recent, [['at', 'Time', 'ago'], ['src_ip', 'IP'], ['method', 'Method'], ['path', 'Path'], ['status_code', 'Status']]);
+                html += '<div class="drill-section"><h4>Recent requests</h4><div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Time</th><th>IP</th><th>Method</th><th>Path</th><th>Status</th><th>Detail</th></tr></thead><tbody>' +
+                    d.recent.map((e) => {
+                        const bad = Number(e.status_code) >= 400 || /warn|err|crit|alert|emerg|fatal/i.test(String(e.level || ''));
+                        return '<tr' + (bad ? ' class="err"' : '') + '><td class="muted">' + H.ago(e.at) + '</td>' +
+                            '<td class="mono">' + H.esc(e.src_ip || '—') + '</td>' +
+                            '<td class="mono">' + H.esc(e.method || '—') + '</td>' +
+                            '<td class="mono" title="' + H.esc(e.path || '') + '">' + H.esc(e.path || '—') + '</td>' +
+                            '<td>' + (e.status_code != null ? this.scBadge(e.status_code) : '—') + '</td>' +
+                            '<td class="errline">' + (e.message ? H.esc(String(e.message)) : '<span class="em">—</span>') + '</td></tr>';
+                    }).join('') +
+                    '</tbody></table></div></div>';
             }
             return html;
         },
@@ -977,13 +1211,17 @@
 
             // --- Metrics band: at-a-glance what the check covered ---
             const metric = (k, v) => '<div class="m"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
+            const httpBadge = d.http ? '<span class="badge ' + (d.http.ok ? 'healthy' : 'unhealthy') + '">' + (d.http.status != null ? H.esc(String(d.http.status)) : (d.http.ok ? 'ok' : 'fail')) + '</span>' : '—';
+            const helperBadge = d.helper ? '<span class="badge healthy">ok</span>' : (d.helper_error ? '<span class="badge unhealthy">error</span>' : '—');
             let html = '<div class="drill-meta">' +
                 metric('Overall', '<span class="badge ' + H.esc(overall) + '">' + H.esc(overall) + '</span>') +
                 metric('Last checked', a.last_checked ? H.ago(a.last_checked) : 'never') +
-                metric('Trigger', latest ? H.esc(latest.trigger_type) : '—') +
-                metric('Checks run', probes.length ? H.esc(probes.join(', ')) : '—') +
+                metric('Trigger', latest ? '<span class="badge ' + (latest.trigger_type === 'auto' ? 'info' : 'clean') + '">' + H.esc(latest.trigger_type) + '</span>' : '—') +
+                metric('HTTP probe', httpBadge) +
+                metric('Helper', helperBadge) +
                 metric('Response', d.http && d.http.time_ms != null ? H.esc(String(d.http.time_ms)) + ' ms' : '—') +
-                metric('Version', version ? H.esc(String(version)) : '—') +
+                metric('Version', version ? H.esc(String(typeof version === 'object' ? (version.version || JSON.stringify(version)) : version)) : '—') +
+                metric('Checks run', probes.length ? H.esc(probes.join(', ')) : '—') +
                 metric('Logs 24h', (logs.total_24h != null ? Number(logs.total_24h).toLocaleString() : '0') +
                     (logs.errors_24h ? ' <span class="badge failed">' + logs.errors_24h + ' err</span>' : '')) +
                 '</div>';
@@ -991,15 +1229,18 @@
             // --- Auto / last-ran note ---
             html += '<p class="muted" style="margin-top:-4px">' + (auto.enabled
                 ? 'Checks run automatically every <strong>' + H.esc(String(auto.interval_min)) + ' min</strong> via the monitor worker.'
-                : '<strong>Manual checks only</strong> — automatic checks are disabled.') + '</p>';
+                : '<strong>Manual checks only</strong> — automatic checks are disabled.') +
+                (a.health_url ? ' · probe <span class="mono">' + H.esc(a.health_url) + '</span>' : '') + '</p>';
 
             if (!latest) {
                 html += '<p class="muted">No checks have run yet. Click “Check” to run one now.</p>';
             }
 
+            html += '<div class="detail-grid">';
+
             // --- HTTP probe ---
             if (d.http) {
-                html += '<div class="drill-section"><h4>HTTP probe ' +
+                html += '<div class="drill-section full"><h4>HTTP probe ' +
                     '<span class="badge ' + (d.http.ok ? 'healthy' : 'unhealthy') + '">' + (d.http.ok ? 'ok' : 'fail') + '</span></h4>' +
                     '<table class="data kv"><tbody>' +
                     '<tr><th>Endpoint</th><td class="mono">' + H.esc(a.health_url || '—') + '</td></tr>' +
@@ -1051,6 +1292,8 @@
             }
             html += '</div>';
 
+            html += '</div>'; // close .detail-grid
+
             // --- Advanced: full raw payload ---
             if (latest && d && Object.keys(d).length) {
                 html += '<div class="drill-section"><details><summary class="adv-toggle">Advanced — raw payload</summary>' +
@@ -1074,18 +1317,29 @@
             }
             html += '</div>';
 
-            UI.modal('Health — ' + (a.name || a.slug), html, (_d, close) => close(), 'Close');
+            UI.modal('Health — ' + (a.name || a.slug), html, (_d, close) => close(), 'Close', { size: 'wide' });
         },
         _kvTable(obj) {
+            const fmt = (v) => {
+                if (v === true) { return '<span class="badge sc2">yes</span>'; }
+                if (v === false) { return '<span class="badge sc4">no</span>'; }
+                if (v === null || v === undefined || v === '') { return '<span class="muted">—</span>'; }
+                if (typeof v === 'number') { return '<span class="kv-metric">' + v.toLocaleString() + '</span>'; }
+                if (Array.isArray(v)) {
+                    if (!v.length) { return '<span class="muted">none</span>'; }
+                    if (typeof v[0] !== 'object') { return H.esc(v.join(', ')); }
+                    return '<div class="subkv">' + v.map((it, i) => '<div class="r"><span class="sk">#' + i + '</span><span>' + fmt(it) + '</span></div>').join('') + '</div>';
+                }
+                if (typeof v === 'object') {
+                    const ks = Object.keys(v);
+                    if (!ks.length) { return '<span class="muted">—</span>'; }
+                    return '<div class="subkv">' + ks.map((k) => '<div class="r"><span class="sk">' + H.esc(k) + '</span><span>' + fmt(v[k]) + '</span></div>').join('') + '</div>';
+                }
+                return H.esc(String(v));
+            };
             const keys = Object.keys(obj).filter((k) => k !== 'summary');
             if (!keys.length) { return '<p class="muted">Empty payload.</p>'; }
-            const rows = keys.map((k) => {
-                let v = obj[k];
-                if (v === true) v = 'yes'; else if (v === false) v = 'no';
-                else if (v === null) v = '—';
-                else if (typeof v === 'object') v = JSON.stringify(v);
-                return '<tr><th>' + H.esc(k) + '</th><td class="mono">' + H.esc(String(v)) + '</td></tr>';
-            }).join('');
+            const rows = keys.map((k) => '<tr><th>' + H.esc(k) + '</th><td>' + fmt(obj[k]) + '</td></tr>').join('');
             return '<table class="data kv"><tbody>' + rows + '</tbody></table>';
         },
         discover() {

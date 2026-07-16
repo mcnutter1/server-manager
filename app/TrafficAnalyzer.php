@@ -583,12 +583,36 @@ final class TrafficAnalyzer
         );
 
         $recent = [];
+        $errors = [];
+        $statusCodes = [];
         if ($meta) {
+            $appId = (int) $meta['id'];
             $recent = $db->all(
                 "SELECT method, path, status_code, bytes, level, message, src_ip,
                         COALESCE(logged_at, created_at) AS at
                  FROM app_log_events WHERE app_id = ? ORDER BY id DESC LIMIT 40",
-                [(int) $meta['id']]
+                [$appId]
+            );
+            // Recent problem lines: HTTP >= 400 or a warn/error severity level.
+            $errors = $db->all(
+                "SELECT method, path, status_code, level, message, src_ip,
+                        COALESCE(logged_at, created_at) AS at
+                 FROM app_log_events
+                 WHERE app_id = ?
+                   AND (status_code >= 400
+                        OR LOWER(level) IN ('warn','warning','error','err','crit','critical','alert','emergency','fatal'))
+                   AND COALESCE(logged_at, created_at) >= (NOW() - INTERVAL {$hours} HOUR)
+                 ORDER BY id DESC LIMIT 40",
+                [$appId]
+            );
+            // Status-code distribution over the window (from structured app logs).
+            $statusCodes = $db->all(
+                "SELECT status_code, COUNT(*) AS hits
+                 FROM app_log_events
+                 WHERE app_id = ? AND status_code IS NOT NULL
+                   AND COALESCE(logged_at, created_at) >= (NOW() - INTERVAL {$hours} HOUR)
+                 GROUP BY status_code ORDER BY hits DESC LIMIT 20",
+                [$appId]
             );
         }
 
@@ -603,11 +627,13 @@ final class TrafficAnalyzer
                 'first_seen' => $act['first_seen'] ?? null,
                 'last_seen'  => $act['last_seen'] ?? null,
             ],
-            'sources'      => $sources,
-            'countries'    => $countries,
-            'endpoints'    => $endpoints,
-            'recent'       => $recent,
-            'window_hours' => $hours,
+            'sources'       => $sources,
+            'countries'     => $countries,
+            'endpoints'     => $endpoints,
+            'status_codes'  => $statusCodes,
+            'errors'        => $errors,
+            'recent'        => $recent,
+            'window_hours'  => $hours,
         ];
     }
 

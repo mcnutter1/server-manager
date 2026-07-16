@@ -490,6 +490,17 @@ User=${WEB_USER}
 ExecStart=${php_bin} ${APP_DIR}/bin/traffic-worker.php
 EOF
 
+    cat > /etc/systemd/system/srvmgr-threatintel.service <<EOF
+[Unit]
+Description=Server Manager threat-intel worker (malicious IP feeds)
+After=mysql.service mariadb.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=${WEB_USER}
+ExecStart=${php_bin} ${APP_DIR}/bin/threat-intel.php
+EOF
+
     cat > /etc/systemd/system/srvmgr-metrics.timer <<'EOF'
 [Unit]
 Description=Run Server Manager metrics collector every minute
@@ -526,8 +537,20 @@ Unit=srvmgr-traffic.service
 WantedBy=timers.target
 EOF
 
+    cat > /etc/systemd/system/srvmgr-threatintel.timer <<'EOF'
+[Unit]
+Description=Run Server Manager threat-intel worker every 15 minutes
+[Timer]
+OnBootSec=180
+OnUnitActiveSec=900
+AccuracySec=30s
+Unit=srvmgr-threatintel.service
+[Install]
+WantedBy=timers.target
+EOF
+
     systemctl daemon-reload
-    systemctl enable --now srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer >/dev/null 2>&1 || true
+    systemctl enable --now srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer srvmgr-threatintel.timer >/dev/null 2>&1 || true
 
     # The traffic worker parses apache access logs, which are root:adm 640.
     # Add the worker user to 'adm' so it can read them (else the map has no

@@ -214,8 +214,9 @@ fix_perms() {
 
 reload_services() {
     ensure_traffic_timer
+    ensure_threatintel_timer
     systemctl daemon-reload 2>/dev/null || true
-    systemctl restart srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer 2>/dev/null || true
+    systemctl restart srvmgr-metrics.timer srvmgr-nids.timer srvmgr-traffic.timer srvmgr-threatintel.timer 2>/dev/null || true
     apache2ctl configtest >/dev/null 2>&1 && systemctl reload apache2 2>/dev/null || c_warn "apache reload skipped."
 }
 
@@ -256,6 +257,41 @@ EOF
 
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now srvmgr-traffic.timer >/dev/null 2>&1 || true
+}
+
+# Install the threat-intel worker unit + timer on existing deployments that
+# predate the malicious-IP feature. Idempotent: only writes when missing.
+ensure_threatintel_timer() {
+    [ -f /etc/systemd/system/srvmgr-threatintel.timer ] && return 0
+    local php_bin; php_bin="$(command -v php)"
+    [ -n "$php_bin" ] || return 0
+    c_info "Installing threat-intel worker timer…"
+
+    cat > /etc/systemd/system/srvmgr-threatintel.service <<EOF
+[Unit]
+Description=Server Manager threat-intel worker (malicious IP feeds)
+After=mysql.service mariadb.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+User=${RUN_AS}
+ExecStart=${php_bin} ${APP_DIR}/bin/threat-intel.php
+EOF
+
+    cat > /etc/systemd/system/srvmgr-threatintel.timer <<'EOF'
+[Unit]
+Description=Run Server Manager threat-intel worker every 15 minutes
+[Timer]
+OnBootSec=180
+OnUnitActiveSec=900
+AccuracySec=30s
+Unit=srvmgr-threatintel.service
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now srvmgr-threatintel.timer >/dev/null 2>&1 || true
 }
 
 main() {

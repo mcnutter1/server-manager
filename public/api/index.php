@@ -19,6 +19,7 @@ use App\SystemMonitor;
 use App\ServiceManager;
 use App\FirewallManager;
 use App\NidsManager;
+use App\ThreatIntel;
 use App\AppManager;
 use App\PairManager;
 use App\LogAnalyzer;
@@ -148,7 +149,9 @@ $post('/firewall/snapshot', static function () {
 // =====================================================================
 // NIDS + blocking
 // =====================================================================
-$get('/nids/stats', static fn () => Response::ok(NidsManager::stats()));
+$get('/nids/stats', static fn () => Response::ok(
+    NidsManager::stats() + ['threat_intel' => ThreatIntel::stats()]
+));
 
 $get('/nids/events', static function () {
     Response::ok(NidsManager::recentEvents((int) ($_GET['limit'] ?? 100)));
@@ -159,6 +162,29 @@ $get('/nids/offenders', static function () {
 });
 
 $get('/nids/blocks', static fn () => Response::ok(NidsManager::activeBlocks()));
+
+// Full drill-down dossier for a single IP (behaviour, block history, NIDS
+// timeline, services/apps touched, and malicious-IP threat intelligence).
+$get('/nids/ip', static function () {
+    $ip = trim((string) ($_GET['ip'] ?? ''));
+    if (!is_valid_ip($ip)) {
+        Response::error('Invalid or missing IP address.', 400);
+        return;
+    }
+    $hours = (int) ($_GET['hours'] ?? 24);
+    Response::ok(NidsManager::ipDossier($ip, $hours));
+});
+
+// Force a fresh threat-intel lookup for an IP (privileged; hits upstream feeds).
+$post('/nids/ip/recheck', static function () use ($input) {
+    Auth::requirePrivileged('nids');
+    $ip = trim((string) ($input['ip'] ?? ''));
+    if (!is_valid_ip($ip)) {
+        Response::error('Invalid or missing IP address.', 400);
+        return;
+    }
+    Response::ok(ThreatIntel::check($ip));
+});
 
 $post('/nids/block', static function () use ($input) {
     Auth::requirePrivileged('nids');

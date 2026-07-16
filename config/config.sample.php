@@ -118,6 +118,36 @@ return [
     ],
 
     // -----------------------------------------------------------------
+    // Malicious-IP threat intelligence. IPs are checked against known threat
+    // databases and cached in the ip_reputation table (reactively on drill-down
+    // and proactively by bin/threat-intel.php). All providers are optional.
+    // -----------------------------------------------------------------
+    'threat_intel' => [
+        'enabled'        => true,
+        // How long a cached verdict stays fresh before the cron re-checks it.
+        'cache_hours'    => 12,
+        // An IP is flagged malicious when its combined confidence >= this (0-100).
+        'malicious_score' => 50,
+        // DNS blocklists — free, no API key, IPv4 only. zone => friendly name.
+        // Set to false to disable, or override the list below.
+        'dnsbl_enabled'  => true,
+        'dnsbl'          => [
+            'zen.spamhaus.org'       => 'Spamhaus ZEN',
+            'b.barracudacentral.org' => 'Barracuda',
+            'bl.spamcop.net'         => 'SpamCop',
+            'dnsbl-1.uceprotect.net' => 'UCEPROTECT',
+            'all.s5h.net'            => 's5h',
+        ],
+        // AbuseIPDB REST API (https://www.abuseipdb.com). Leave the key blank
+        // to skip. Free tier allows ~1,000 checks/day.
+        'abuseipdb_key'     => '',
+        'abuseipdb_max_age' => 90,   // consider reports from the last N days
+        // Automatically block IPs the feeds confirm malicious (proactive cron).
+        'auto_block'         => false,
+        'auto_block_minutes' => 1440, // 24h
+    ],
+
+    // -----------------------------------------------------------------
     // GeoIP resolution for the traffic map. Distinct source IPs are resolved
     // once and cached in the geo_cache table.
     // -----------------------------------------------------------------

@@ -239,6 +239,104 @@ final class NidsManager
         );
     }
 
+    /**
+     * Full dossier for a single IP — why it was (or would be) blocked, with the
+     * same drill-down granularity as the traffic view plus block history, the
+     * NIDS event timeline (auth attempts, web attacks, port probes), and a
+     * malicious-IP threat-intelligence verdict.
+     */
+    public static function ipDossier(string $ip, int $hours = 24): array
+    {
+        $ip = trim($ip);
+        if (!is_valid_ip($ip)) {
+            return ['ok' => false, 'error' => 'Invalid IP address.'];
+        }
+        $hours = max(1, min($hours, 24 * 30));
+        $db = Database::instance();
+
+        // Traffic-level detail: geo/ISP, reputation, volume, services,
+        // endpoints, ports probed, and recent per-app request lines.
+        $traffic = TrafficAnalyzer::ipDetail($ip, $hours);
+
+        // Full firewall block history (not just the active row).
+        $blocks = $db->all(
+            "SELECT reason, source, created_by, active, permanent,
+                    blocked_at, expires_at, unblocked_at, hits
+             FROM blocked_hosts WHERE ip_address = ?
+             ORDER BY blocked_at DESC LIMIT 100",
+            [$ip]
+        );
+        foreach ($blocks as &$b) {
+            $b['active']    = (int) $b['active'] === 1;
+            $b['permanent'] = (int) $b['permanent'] === 1;
+            $b['remaining_seconds'] = ($b['active'] && !$b['permanent'] && $b['expires_at'])
+                ? max(0, strtotime((string) $b['expires_at']) - time())
+                : null;
+        }
+        unset($b);
+
+        // NIDS event behaviour grouped by what it did (category), plus a recent
+        // raw timeline and the authentication-attempt subset.
+        $byCategory = $db->all(
+            "SELECT source, category, MAX(severity) AS severity,
+                    SUM(count) AS hits, COUNT(*) AS events,
+                    MIN(created_at) AS first_seen, MAX(created_at) AS last_seen
+             FROM nids_events WHERE src_ip = ?
+             GROUP BY source, category ORDER BY hits DESC LIMIT 50",
+            [$ip]
+        );
+        $recentEvents = $db->all(
+            "SELECT source, category, severity, dst_port, signature, raw, count, created_at
+             FROM nids_events WHERE src_ip = ?
+             ORDER BY created_at DESC LIMIT 60",
+            [$ip]
+        );
+        $auth = $db->all(
+            "SELECT category, severity, dst_port, signature, raw, count, created_at
+             FROM nids_events WHERE src_ip = ? AND source = 'auth'
+             ORDER BY created_at DESC LIMIT 40",
+            [$ip]
+        );
+        $counts = $db->one(
+            "SELECT COUNT(*) AS events, COALESCE(SUM(count), 0) AS hits,
+                    SUM(source = 'auth') AS auth_events,
+                    SUM(severity IN ('high','critical')) AS severe,
+                    MIN(created_at) AS first_seen, MAX(created_at) AS last_seen
+             FROM nids_events WHERE src_ip = ?",
+            [$ip]
+        ) ?? [];
+
+        return [
+            'ok'          => true,
+            'ip'          => $ip,
+            'window_hours'=> $hours,
+            'blocked_now' => self::isBlocked($ip),
+            'whitelisted' => self::isWhitelisted($ip),
+            'geo'         => $traffic['geo'] ?? [],
+            'reputation'  => $traffic['reputation'] ?? [],
+            'activity'    => $traffic['activity'] ?? [],
+            'services'    => $traffic['services'] ?? [],
+            'endpoints'   => $traffic['endpoints'] ?? [],
+            'ports'       => $traffic['ports'] ?? [],
+            'recent'      => $traffic['recent'] ?? [],
+            'blocks'      => $blocks,
+            'events'      => [
+                'summary' => [
+                    'events'      => (int) ($counts['events'] ?? 0),
+                    'hits'        => (int) ($counts['hits'] ?? 0),
+                    'auth_events' => (int) ($counts['auth_events'] ?? 0),
+                    'severe'      => (int) ($counts['severe'] ?? 0),
+                    'first_seen'  => $counts['first_seen'] ?? null,
+                    'last_seen'   => $counts['last_seen'] ?? null,
+                ],
+                'by_category' => $byCategory,
+                'recent'      => $recentEvents,
+                'auth'        => $auth,
+            ],
+            'intel'       => ThreatIntel::lookup($ip),
+        ];
+    }
+
     public static function isWhitelisted(string $ip): bool
     {
         if (!is_valid_ip($ip)) {

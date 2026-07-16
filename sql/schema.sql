@@ -345,7 +345,28 @@ CREATE TABLE IF NOT EXISTS pairing_codes (
     KEY idx_expires (expires_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ---------------------------------------------------------------------
+-- IP reputation / threat-intelligence cache. The malicious-IP verdict for
+-- each address checked against known threat databases (DNSBLs, AbuseIPDB).
+-- Populated reactively on drill-down and proactively by the threat-intel cron.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS ip_reputation (
+    ip_address     VARCHAR(45)     NOT NULL,
+    is_malicious   TINYINT(1)      NOT NULL DEFAULT 0,
+    score          INT             NOT NULL DEFAULT 0,   -- 0..100 confidence
+    total_reports  INT             NOT NULL DEFAULT 0,
+    categories     VARCHAR(255)    NULL,                 -- comma-joined threat categories
+    sources        JSON            NULL,                 -- per-provider detail array
+    usage_type     VARCHAR(120)    NULL,                 -- e.g. Data Center / ISP (AbuseIPDB)
+    status         VARCHAR(20)     NOT NULL DEFAULT 'ok',-- ok | private | error | disabled
+    last_listed_at DATETIME        NULL,
+    checked_at     DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (ip_address),
+    KEY idx_malicious (is_malicious),
+    KEY idx_checked (checked_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Seed a couple of defaults.
 INSERT INTO settings (skey, svalue) VALUES
-    ('schema_version', '"1.6.0"')
+    ('schema_version', '"1.7.0"')
 ON DUPLICATE KEY UPDATE svalue = VALUES(svalue);

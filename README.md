@@ -188,6 +188,20 @@ Whitelisted IPs (`nids.whitelist`) are never blocked. Blocks live in a
 dedicated `SRVMGR_BLOCK` iptables chain so they never collide with your other
 rules.
 
+Click any IP in the NIDS view (active blocks, top offenders or recent events)
+to open its **dossier** — geo/ISP/ASN, network type, full block history (why it
+was blocked), the NIDS behaviour timeline (authentication attempts, web
+attacks, port probes with the raw log lines), the applications/services it
+touched, top endpoints, and a **malicious‑IP threat‑intelligence** verdict.
+
+`bin/threat-intel.php` (every 15 minutes) scores the most active offenders and
+recently blocked hosts against known malicious‑IP databases and caches the
+verdict in `ip_reputation`. Lookups are also performed reactively when you drill
+into an IP. Providers (all optional, `config('threat_intel.*')`): free DNS
+blocklists (Spamhaus, Barracuda, SpamCop, …) and AbuseIPDB (API key). Set
+`threat_intel.auto_block` to automatically block anything the feeds confirm
+malicious.
+
 ---
 
 ## Managing your apps
@@ -218,10 +232,14 @@ unmanaged apps under `/var/www` and adopt them.
 |--------|---------|----------------|
 | `bin/collect-metrics.php` | 1 min | Store metrics, monitor critical services, raise resource/service alerts, 30‑day retention. |
 | `bin/nids-worker.php` | 1 min | Expire timed blocks, scan logs for threats, auto‑block. |
+| `bin/traffic-worker.php` | 2 min | Ingest apache/app logs into the traffic map, geolocate sources. |
+| `bin/threat-intel.php` | 15 min | Score active offenders against malicious‑IP databases, cache verdicts, optional auto‑block. |
 
 Run via the provided systemd timers (preferred) or cron:
 
 ```
 * * * * * www-data /usr/bin/php /var/www/server-manager/bin/collect-metrics.php >/dev/null 2>&1
 * * * * * www-data /usr/bin/php /var/www/server-manager/bin/nids-worker.php     >/dev/null 2>&1
+*/2 * * * * www-data /usr/bin/php /var/www/server-manager/bin/traffic-worker.php >/dev/null 2>&1
+*/15 * * * * www-data /usr/bin/php /var/www/server-manager/bin/threat-intel.php  >/dev/null 2>&1
 ```

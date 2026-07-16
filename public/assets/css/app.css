@@ -212,13 +212,15 @@ input.search { min-width: 220px; }
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: grid; place-items: center; z-index: 500; }
 .modal { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; width: min(520px, 92vw); box-shadow: var(--shadow); }
 .modal h3 { margin: 0 0 16px; }
+.modal.modal-wide { width: min(1060px, 95vw); max-height: 90vh; display: flex; flex-direction: column; }
+.modal.modal-wide .modal-body { overflow-y: auto; padding-right: 4px; }
 .modal .field { margin-bottom: 13px; display: flex; flex-direction: column; gap: 5px; }
 .modal .field label { font-size: 12px; color: var(--muted); }
 .modal .field input, .modal .field select, .modal .field textarea { width: 100%; }
 .modal .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 
 /* ---------------- Entity drill-down ---------------- */
-.drill-modal { width: min(880px, 94vw); max-height: 88vh; display: flex; flex-direction: column; padding: 0; }
+.drill-modal { width: min(1040px, 95vw); max-height: 90vh; display: flex; flex-direction: column; padding: 0; }
 .drill-head { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
 .drill-head h3 { margin: 0; flex: 1; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .drill-head .btn.sm { padding: 5px 10px; font-size: 12px; }
@@ -237,6 +239,14 @@ tr.clickable:hover td { background: rgba(79, 140, 255, .08); }
 .badge.mobile { background: rgba(79, 140, 255, .16); color: var(--brand-2); }
 .badge.flag { background: rgba(255, 89, 100, .16); color: var(--crit); }
 .badge.clean { background: rgba(46, 204, 113, .16); color: var(--good); }
+
+/* NIDS IP dossier drill */
+.drill-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.intel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.intel-src { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: var(--panel-2, rgba(255,255,255,.02)); }
+.intel-src.bad { border-color: rgba(255, 89, 100, .4); background: rgba(255, 89, 100, .08); }
+.intel-src .isrc-name { font-size: 13px; font-weight: 700; }
+.intel-src .isrc-detail { font-size: 12px; color: var(--muted); margin-top: 2px; }
 
 /* traffic tag filter bar */
 .filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 4px; min-height: 30px; }
@@ -269,6 +279,27 @@ table.data.kv td { word-break: break-word; }
 pre.payload { background: var(--panel-2, rgba(0,0,0,.25)); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 6px 0 0; font-size: 12px; line-height: 1.5; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: var(--text, #cdd6e0); }
 .adv-toggle { cursor: pointer; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; user-select: none; }
 .adv-toggle:hover { color: var(--text, #e6edf3); }
+
+/* two-column section layout for wide detail modals */
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 22px; align-items: start; }
+.detail-grid > .drill-section { margin-top: 14px; }
+.detail-grid > .full { grid-column: 1 / -1; }
+@media (max-width: 780px) { .detail-grid { grid-template-columns: 1fr; } }
+/* nested key/value payloads */
+table.data.kv td .subkv { margin: 4px 0 0; padding-left: 10px; border-left: 2px solid var(--border); }
+table.data.kv td .subkv .r { display: flex; gap: 8px; font-size: 12px; }
+table.data.kv td .subkv .r .sk { color: var(--muted); min-width: 90px; }
+.kv-metric { font-variant-numeric: tabular-nums; }
+/* problem log rows */
+tr.err td { background: rgba(255, 89, 100, .07); }
+tr.err td.mono { color: var(--crit); }
+.badge.sc2 { background: rgba(46, 204, 113, .16); color: var(--good); }
+.badge.sc3 { background: rgba(79, 140, 255, .16); color: var(--brand-2); }
+.badge.sc4 { background: rgba(245, 166, 35, .18); color: var(--warn); }
+.badge.sc5 { background: rgba(255, 89, 100, .18); color: var(--crit); }
+.errline { font-size: 12.5px; color: var(--text, #cdd6e0); word-break: break-word; }
+.errline .em { color: var(--muted); }
+.sc-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 2px; }
 
 /* ---------------- Chart ---------------- */
 .chart-box { position: relative; height: 240px; }
