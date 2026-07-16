@@ -28,6 +28,7 @@ use App\TrafficAnalyzer;
 use App\Notifier;
 use App\Runner;
 use App\Database;
+use function App\is_valid_ip;
 
 // ---------------------------------------------------------------------
 // CORS / preflight (same-origin SPA + token clients).
