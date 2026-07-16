@@ -296,80 +296,231 @@
     // ---- NIDS --------------------------------------------------------
     Views.nids = {
         title: 'NIDS / Blocks',
+        _hours: 24,
+        _filter: { tags: [], logic: 'and' },
+        _blocks: [],
+        _offenders: [],
+        _events: [],
+        _apps: [],
         render($el) {
             $el.html(
-                '<div class="grid cols-4" id="nidsStats"></div>' +
-                '<div class="section-head" style="margin-top:16px"><h2>Blocked hosts</h2>' +
-                (SM.admin ? '<div class="actions"><button class="btn" id="blockBtn">＋ Block host</button></div>' : '') + '</div>' +
-                '<div class="card"><div id="blocksTable"></div></div>' +
+                '<div class="section-head"><h2>NIDS / Security <span class="sub">blocks · events · app activity</span></h2>' +
+                '<div class="actions">' +
+                '  <select id="nidsHours" class="btn ghost">' +
+                '    <option value="1">Last 1h</option><option value="6">Last 6h</option>' +
+                '    <option value="24" selected>Last 24h</option><option value="168">Last 7d</option>' +
+                '  </select>' +
+                (SM.admin ? '<button class="btn" id="blockBtn">＋ Block host</button>' : '') +
+                '</div></div>' +
+                '<div class="filter-bar" id="nidsFilter"></div>' +
+                '<div class="grid cols-5" id="nidsStats"></div>' +
+                '<div class="section-head" style="margin-top:16px"><h2>Blocked hosts</h2></div>' +
+                '<div class="card" style="padding:0;overflow:hidden"><div id="blocksTable"></div></div>' +
                 '<div class="grid cols-2" style="margin-top:16px">' +
-                '  <div class="card"><h3>Top offenders <span class="sub">24h</span></h3><div id="offenders"></div></div>' +
-                '  <div class="card"><h3>Recent events</h3><div id="nidsEvents"></div></div>' +
+                '  <div class="card"><h3>Top offenders <span class="sub">24h · click a row for detail</span></h3><div id="offenders"></div></div>' +
+                '  <div class="card"><h3>Recent NIDS events <span class="sub">click a row for detail</span></h3><div id="nidsEvents"></div></div>' +
+                '</div>' +
+                '<div class="grid cols-2" style="margin-top:16px">' +
+                '  <div class="card"><h3>Application activity <span class="sub">requests · errors · volume</span></h3><div id="nidsApps"></div></div>' +
+                '  <div class="card"><h3>System resources <span class="sub">live</span></h3><div id="nidsRes"></div></div>' +
                 '</div>'
             );
-            $('#blockBtn').on('click', () => this.blockModal());
+            $('#nidsHours').val(String(this._hours)).on('change', () => {
+                this._hours = Number($('#nidsHours').val()) || 24;
+                this.fetch(false);
+            });
+            if (SM.admin) { $('#blockBtn').on('click', () => this.blockModal()); }
+            this.renderFilterBar();
+            this.bindEvents($el);
             this.load();
         },
-        load() {
-            API.get('/nids/stats').then((r) => {
-                const n = r.data, ti = n.threat_intel || {};
-                $('#nidsStats').html(
-                    statBox('Active blocks', n.active_blocks) +
-                    statBox('Permanent', n.permanent) +
-                    statBox('Events 24h', n.events_24h) +
-                    statBox('Critical 24h', n.critical_24h, n.critical_24h > 0 ? 'crit' : '') +
-                    statBox('Malicious IPs', ti.malicious_known || 0, (ti.malicious_known || 0) > 0 ? 'crit' : '')
-                );
+        // Delegated handlers survive table re-renders during background refresh.
+        bindEvents($el) {
+            const self = this;
+            // 🏷 tag-add + severity-badge filter clicks (must win over row-drill).
+            $el.on('click', '.tagbtn, .tagflag', function (e) {
+                e.stopPropagation(); e.preventDefault();
+                const d = this.dataset;
+                self.addTag(d.tagt, d.tagv, d.tagl);
             });
-            UI.loading($('#blocksTable'));
-            API.get('/nids/blocks').then((r) => {
-                $('#blocksTable').html('<div class="table-wrap"><table class="data"><thead><tr>' +
-                    '<th>IP</th><th>Reason</th><th>Source</th><th>Hits</th><th>Expires</th><th>By</th>' + (SM.admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
-                    (r.data.length ? r.data.map((b) => (
-                        '<tr class="clickable" data-nidsip="' + H.esc(b.ip_address) + '"><td class="mono">' + H.esc(b.ip_address) + '</td>' +
-                        '<td>' + H.esc(b.reason || '—') + '</td>' +
-                        '<td><span class="badge info">' + H.esc(b.source) + '</span></td>' +
-                        '<td class="mono">' + (b.hits || 0).toLocaleString() + '</td>' +
-                        '<td>' + (b.permanent == 1 ? '<span class="badge failed">permanent</span>' : H.dur(b.remaining_seconds)) + '</td>' +
-                        '<td class="muted">' + H.esc(b.created_by || '') + '</td>' +
-                        (SM.admin ? '<td style="text-align:right"><button class="btn small ghost" data-unblock="' + H.esc(b.ip_address) + '">Unblock</button></td>' : '') +
-                        '</tr>'
-                    )).join('') : '<tr><td colspan="7" class="muted">no active blocks</td></tr>') +
-                    '</tbody></table></div>');
-                $('#blocksTable tr[data-nidsip]').on('click', function () { Views.nids.openIp($(this).data('nidsip')); });
-                $('#blocksTable [data-unblock]').on('click', function (e) {
-                    e.stopPropagation();
-                    const ip = $(this).data('unblock');
-                    UI.confirm('Unblock ' + ip + '?', () => API.post('/nids/unblock', { ip: ip }).then(() => {
-                        UI.toast('success', 'Unblocked', ip); Views.nids.load();
-                    }));
-                });
+            // Filter-bar controls.
+            $el.on('click', '#nidsFilter [data-rm]', function (e) { e.stopPropagation(); self.removeTag(Number($(this).data('rm'))); });
+            $el.on('click', '#nidsFilter [data-logic]', () => self.toggleLogic());
+            $el.on('click', '#nidsFilter [data-clear]', () => self.clearTags());
+            // Row actions.
+            $el.on('click', '[data-unblock]', function (e) {
+                e.stopPropagation();
+                const ip = String($(this).data('unblock'));
+                UI.confirm('Unblock ' + ip + '?', () => API.post('/nids/unblock', { ip: ip })
+                    .then(() => { UI.toast('success', 'Unblocked', ip); self.fetch(false); }));
             });
-            API.get('/nids/offenders').then((r) => {
-                $('#offenders').html('<div class="table-wrap"><table class="data"><thead><tr><th>IP</th><th>Events</th><th>Worst</th><th>Last</th>' + (SM.admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
-                    r.data.map((o) => (
-                        '<tr class="clickable" data-nidsip="' + H.esc(o.src_ip) + '"><td class="mono">' + H.esc(o.src_ip) + '</td><td>' + o.events + '</td>' +
-                        '<td><span class="badge ' + H.esc(o.worst) + '">' + H.esc(o.worst) + '</span></td>' +
-                        '<td class="muted">' + H.ago(o.last_seen) + '</td>' +
-                        (SM.admin ? '<td style="text-align:right"><button class="btn small danger" data-quickblock="' + H.esc(o.src_ip) + '">Block</button></td>' : '') + '</tr>'
-                    )).join('') + '</tbody></table></div>');
-                $('#offenders tr[data-nidsip]').on('click', function () { Views.nids.openIp($(this).data('nidsip')); });
-                $('#offenders [data-quickblock]').on('click', function (e) {
-                    e.stopPropagation();
-                    const ip = $(this).data('quickblock');
-                    API.post('/nids/block', { ip: ip, reason: 'Manual block from offenders', minutes: 60, source: 'manual' })
-                        .then(() => { UI.toast('success', 'Blocked', ip); Views.nids.load(); });
-                });
+            $el.on('click', '[data-quickblock]', function (e) {
+                e.stopPropagation();
+                const ip = String($(this).data('quickblock'));
+                API.post('/nids/block', { ip: ip, reason: 'Manual block from offenders', minutes: 60, source: 'manual' })
+                    .then(() => { UI.toast('success', 'Blocked', ip); self.fetch(false); });
             });
-            API.get('/nids/events?limit=40').then((r) => {
-                $('#nidsEvents').html('<div class="table-wrap"><table class="data"><thead><tr><th>Time</th><th>Src</th><th>Category</th><th>Sev</th></tr></thead><tbody>' +
-                    r.data.map((e) => (
-                        '<tr class="clickable" data-nidsip="' + H.esc(e.src_ip) + '"><td class="muted">' + H.ago(e.created_at) + '</td><td class="mono">' + H.esc(e.src_ip) + '</td>' +
-                        '<td>' + H.esc(e.category) + '</td><td><span class="badge ' + H.esc(e.severity) + '">' + H.esc(e.severity) + '</span></td></tr>'
-                    )).join('') + '</tbody></table></div>');
-                $('#nidsEvents tr[data-nidsip]').on('click', function () { Views.nids.openIp($(this).data('nidsip')); });
+            // App rows open the traffic application drill-down (shared UI).
+            $el.on('click', 'tr[data-nidsapp]', function () {
+                const a = String($(this).data('nidsapp'));
+                if (a && Views.traffic && Views.traffic.drill) { Views.traffic.drill.openApp(a); }
             });
+            // IP rows open the NIDS dossier.
+            $el.on('click', 'tr[data-nidsip]', function () { self.openIp($(this).data('nidsip')); });
         },
+        load() { this.fetch(true); },
+        // Background auto-refresh: same AJAX fetch, no spinner, no page reload.
+        refresh() { this.fetch(false); },
+        fetch(initial) {
+            const self = this;
+            if (initial) { UI.loading($('#blocksTable')); }
+            API.get('/nids/stats').then((r) => self.renderStats(r.data));
+            API.get('/nids/blocks').then((r) => { self._blocks = r.data || []; self.renderBlocks(); });
+            API.get('/nids/offenders?limit=25').then((r) => { self._offenders = r.data || []; self.renderOffenders(); });
+            API.get('/nids/events?limit=200').then((r) => { self._events = r.data || []; self.renderEvents(); });
+            API.get('/traffic/apps?hours=' + this._hours).then((r) => { self._apps = r.data || []; self.renderApps(); }).catch(() => {});
+            API.get('/system/overview').then((r) => self.renderResources(r.data)).catch(() => {});
+        },
+        renderStats(n) {
+            const ti = (n && n.threat_intel) || {};
+            $('#nidsStats').html(
+                statBox('Active blocks', n.active_blocks) +
+                statBox('Permanent', n.permanent) +
+                statBox('Events 24h', n.events_24h) +
+                statBox('Critical 24h', n.critical_24h, n.critical_24h > 0 ? 'crit' : '') +
+                statBox('Malicious IPs', ti.malicious_known || 0, (ti.malicious_known || 0) > 0 ? 'crit' : '')
+            );
+        },
+        // ---- Filtering (client-side, traffic-style chips) ------------
+        // A row passes when, per tag-type group, at least one value matches
+        // (OR within a type); groups combine with the global AND / OR logic.
+        _rowMatches(fieldMap) {
+            const tags = this._filter.tags.filter((t) => (t.t in fieldMap) && fieldMap[t.t] != null && fieldMap[t.t] !== '');
+            if (!tags.length) { return true; }
+            const byType = {};
+            tags.forEach((t) => { (byType[t.t] = byType[t.t] || []).push(String(t.v).toLowerCase()); });
+            const groups = Object.keys(byType).map((type) => {
+                const rv = String(fieldMap[type]).toLowerCase();
+                return byType[type].some((v) => rv === v || rv.indexOf(v) !== -1);
+            });
+            return this._filter.logic === 'or' ? groups.some(Boolean) : groups.every(Boolean);
+        },
+        tagBtn(t, v, label) {
+            if (v == null || v === '') { return ''; }
+            return '<button class="tagbtn" title="Filter by ' + H.esc(String(label || v)) + '"' +
+                ' data-tagt="' + H.esc(t) + '" data-tagv="' + H.esc(String(v)) + '"' +
+                ' data-tagl="' + H.esc(String(label || v)) + '">&#127991;</button>';
+        },
+        sevBadge(sev) {
+            const s = String(sev || '').toLowerCase();
+            return '<button class="badge ' + H.esc(s) + ' tagflag" title="Filter by severity ' + H.esc(s || '—') + '"' +
+                ' data-tagt="severity" data-tagv="' + H.esc(s) + '" data-tagl="' + H.esc(s || '—') + '">' + H.esc(s || '—') + '</button>';
+        },
+        addTag(t, v, label) {
+            if (!t || v == null || v === '') { return; }
+            const exists = this._filter.tags.some((x) => x.t === t && String(x.v) === String(v));
+            if (!exists) {
+                this._filter.tags.push({ t: t, v: String(v), label: label || String(v) });
+                this.renderFilterBar();
+                this.applyFilters();
+                UI.toast('info', 'Filter added', label || String(v));
+            }
+        },
+        removeTag(i) { this._filter.tags.splice(i, 1); this.renderFilterBar(); this.applyFilters(); },
+        clearTags() { if (!this._filter.tags.length) { return; } this._filter.tags = []; this.renderFilterBar(); this.applyFilters(); },
+        toggleLogic() { this._filter.logic = this._filter.logic === 'or' ? 'and' : 'or'; this.renderFilterBar(); this.applyFilters(); },
+        applyFilters() { this.renderBlocks(); this.renderOffenders(); this.renderEvents(); },
+        renderFilterBar() {
+            const $f = $('#nidsFilter');
+            if (!$f.length) { return; }
+            const tags = this._filter.tags;
+            const icons = { ip: '&#128225;', severity: '&#9873;', category: '&#128278;', source: '&#128230;' };
+            if (!tags.length) {
+                $f.removeClass('active').html('<span class="fhint">No filters — click a &#127991; icon on any IP, category or source, or a severity badge, to filter.</span>');
+                return;
+            }
+            const logic = this._filter.logic.toUpperCase();
+            let html = '<span class="flabel">Filter</span>';
+            tags.forEach((t, i) => {
+                if (i > 0) { html += '<button class="flogic" data-logic title="Toggle AND / OR">' + logic + '</button>'; }
+                html += '<span class="fchip fchip-' + H.esc(t.t) + '"><span class="fico">' + (icons[t.t] || '') + '</span>' +
+                    '<span class="ftxt">' + H.esc(t.label || t.v) + '</span>' +
+                    '<button class="frm" data-rm="' + i + '" title="Remove">&times;</button></span>';
+            });
+            html += '<button class="fclear" data-clear title="Clear all filters">Clear</button>';
+            $f.addClass('active').html(html);
+        },
+        // ---- Table renderers -----------------------------------------
+        renderBlocks() {
+            const rows = this._blocks.filter((b) => this._rowMatches({ ip: b.ip_address, source: b.source }));
+            const cols = SM.admin ? 7 : 6;
+            $('#blocksTable').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                '<th>IP</th><th>Reason</th><th>Source</th><th class="num">Hits</th><th>Expires</th><th>By</th>' + (SM.admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
+                (rows.length ? rows.map((b) => (
+                    '<tr class="clickable" data-nidsip="' + H.esc(b.ip_address) + '"><td class="mono">' + H.esc(b.ip_address) + this.tagBtn('ip', b.ip_address, b.ip_address) + '</td>' +
+                    '<td>' + H.esc(b.reason || '—') + '</td>' +
+                    '<td><span class="badge info">' + H.esc(b.source) + '</span>' + this.tagBtn('source', b.source, b.source) + '</td>' +
+                    '<td class="mono">' + (b.hits || 0).toLocaleString() + '</td>' +
+                    '<td>' + (b.permanent == 1 ? '<span class="badge failed">permanent</span>' : H.dur(b.remaining_seconds)) + '</td>' +
+                    '<td class="muted">' + H.esc(b.created_by || '') + '</td>' +
+                    (SM.admin ? '<td style="text-align:right"><button class="btn small ghost" data-unblock="' + H.esc(b.ip_address) + '">Unblock</button></td>' : '') +
+                    '</tr>'
+                )).join('') : '<tr><td colspan="' + cols + '" class="muted">' + (this._blocks.length ? 'no blocks match the filter' : 'no active blocks') + '</td></tr>') +
+                '</tbody></table></div>');
+        },
+        renderOffenders() {
+            const rows = this._offenders.filter((o) => this._rowMatches({ ip: o.src_ip, severity: o.worst }));
+            const cols = SM.admin ? 5 : 4;
+            $('#offenders').html('<div class="table-wrap"><table class="data"><thead><tr><th>IP</th><th class="num">Events</th><th>Worst</th><th>Last</th>' + (SM.admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
+                (rows.length ? rows.map((o) => (
+                    '<tr class="clickable" data-nidsip="' + H.esc(o.src_ip) + '"><td class="mono">' + H.esc(o.src_ip) + this.tagBtn('ip', o.src_ip, o.src_ip) + '</td>' +
+                    '<td class="mono">' + (Number(o.events) || 0).toLocaleString() + '</td>' +
+                    '<td>' + this.sevBadge(o.worst) + '</td>' +
+                    '<td class="muted">' + H.ago(o.last_seen) + '</td>' +
+                    (SM.admin ? '<td style="text-align:right"><button class="btn small danger" data-quickblock="' + H.esc(o.src_ip) + '">Block</button></td>' : '') + '</tr>'
+                )).join('') : '<tr><td colspan="' + cols + '" class="muted">' + (this._offenders.length ? 'no offenders match the filter' : 'no offenders in the last 24h') + '</td></tr>') +
+                '</tbody></table></div>');
+        },
+        renderEvents() {
+            const rows = this._events.filter((e) => this._rowMatches({ ip: e.src_ip, severity: e.severity, category: e.category, source: e.source }));
+            $('#nidsEvents').html('<div class="table-wrap"><table class="data"><thead><tr><th>Time</th><th>Src</th><th>Source</th><th>Category</th><th>Sev</th></tr></thead><tbody>' +
+                (rows.length ? rows.slice(0, 60).map((e) => (
+                    '<tr class="clickable" data-nidsip="' + H.esc(e.src_ip) + '"><td class="muted">' + H.ago(e.created_at) + '</td>' +
+                    '<td class="mono">' + H.esc(e.src_ip) + this.tagBtn('ip', e.src_ip, e.src_ip) + '</td>' +
+                    '<td>' + H.esc(e.source || '—') + this.tagBtn('source', e.source, e.source) + '</td>' +
+                    '<td>' + H.esc(e.category || '—') + this.tagBtn('category', e.category, e.category) + '</td>' +
+                    '<td>' + this.sevBadge(e.severity) + '</td></tr>'
+                )).join('') : '<tr><td colspan="5" class="muted">' + (this._events.length ? 'no events match the filter' : 'no recent events') + '</td></tr>') +
+                '</tbody></table></div>');
+        },
+        renderApps() {
+            const rows = this._apps || [];
+            $('#nidsApps').html('<div class="table-wrap"><table class="data"><thead><tr><th>Application</th><th class="num">Sources</th><th class="num">Reqs</th><th class="num">Errors</th><th class="num">Volume</th></tr></thead><tbody>' +
+                (rows.length ? rows.map((x) => (
+                    '<tr class="clickable" data-nidsapp="' + H.esc(x.app || 'server') + '"><td>' + H.esc(x.app || 'server') + '</td>' +
+                    '<td class="mono">' + (Number(x.sources) || 0).toLocaleString() + '</td>' +
+                    '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
+                    '<td class="mono">' + (Number(x.errors) || 0).toLocaleString() + '</td>' +
+                    '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
+                )).join('') : '<tr><td colspan="5" class="muted">no application traffic recorded</td></tr>') +
+                '</tbody></table></div>');
+        },
+        renderResources(d) {
+            if (!d || !d.system) { $('#nidsRes').html('<p class="muted">resources unavailable</p>'); return; }
+            const s = d.system;
+            const bar = (label, pct, sub, warn, crit) => (
+                '<div class="res-row"><div class="res-top"><span>' + H.esc(label) + '</span><span class="mono">' + H.esc(sub) + '</span></div>' +
+                '<div class="meter ' + H.meterClass(pct, warn, crit) + '"><span style="width:' + Math.min(100, pct) + '%"></span></div></div>'
+            );
+            const load = s.load || {};
+            $('#nidsRes').html(
+                bar('CPU', s.cpu.usage_pct, H.pct(s.cpu.usage_pct) + ' · ' + s.cpu.cores + ' cores', 75, 90) +
+                bar('Memory', s.memory.used_pct, H.bytes(s.memory.used) + ' / ' + H.bytes(s.memory.total), 80, 92) +
+                bar('Disk /', s.disk.used_pct, H.bytes(s.disk.free) + ' free', 80, 90) +
+                bar('Load 1m', Math.min(100, (load.per_core_1 || 0) * 100), (load['1'] != null ? load['1'] : '—') + ' · uptime ' + ((s.uptime && s.uptime.human) || '—'), 70, 90)
+            );
+        },
+
         // ---- IP dossier drill-down -----------------------------------
         openIp(ip) { if (ip) { this.drill.open(ip); } },
         drill: {
