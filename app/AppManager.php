@@ -663,10 +663,36 @@ final class AppManager
             return ['ok' => false, 'error' => 'not found', 'commands' => []];
         }
         $call = self::callHelper($app, 'commands');
-        if (!($call['ok'] ?? false)) {
+        $commands = ($call['ok'] ?? false) ? self::normalizeCommands($call['data'] ?? []) : [];
+
+        // Augment with commands an app attaches to its components/services, so
+        // an app that declares its services (each with a `commands` list) still
+        // surfaces runnable commands even without a dedicated `commands` action.
+        $comp = self::callHelper($app, 'components');
+        if ($comp['ok'] ?? false) {
+            $have = array_column($commands, 'key');
+            foreach (self::normalizeComponents($comp['data'] ?? []) as $c) {
+                foreach ($c['commands'] as $key) {
+                    if ($key === '' || in_array($key, $have, true)) {
+                        continue;
+                    }
+                    $commands[] = [
+                        'key'         => $key,
+                        'name'        => $key,
+                        'description' => $c['name'] !== '' ? ($c['name'] . ' command') : '',
+                        'component'   => $c['id'],
+                        'dangerous'   => false,
+                        'params'      => [],
+                    ];
+                    $have[] = $key;
+                }
+            }
+        }
+
+        if (!$commands && !($call['ok'] ?? false)) {
             return ['ok' => false, 'error' => $call['error'] ?? 'helper unreachable', 'commands' => []];
         }
-        return ['ok' => true, 'commands' => self::normalizeCommands($call['data'] ?? [])];
+        return ['ok' => true, 'commands' => $commands];
     }
 
     /**

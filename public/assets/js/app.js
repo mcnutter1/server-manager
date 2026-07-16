@@ -1744,109 +1744,88 @@
     // ---- CLI Runner --------------------------------------------------
     Views.runner = {
         title: 'CLI Runner',
+        _cmdMeta: {},
         render($el) {
             $el.html(
-                '<div class="card"><h3>Whitelisted command runner <span class="sub">executes via protected Python runner</span></h3>' +
-                '<div class="toolbar"><select id="runAction" style="min-width:200px"></select>' +
+                '<div class="card"><h3>Command runner <span class="sub">core services + commands downstream apps expose through their helper</span></h3>' +
+                '<div class="toolbar"><select id="runAction" style="min-width:260px"><option value="">— select command —</option></select>' +
                 '<input id="runArgs" class="search" placeholder=\'args JSON e.g. {"service":"apache2"}\' style="flex:1">' +
                 '<button class="btn" id="runExec">▶ Execute</button></div>' +
-                '<div class="terminal" id="runOut">Ready. Select an action and execute.\n</div></div>' +
-                '<div class="card" style="margin-top:16px"><h3>Application commands <span class="sub">commands downstream apps expose through their helper</span></h3>' +
-                '<div class="toolbar"><select id="appCmdApp" style="min-width:200px"></select>' +
-                '<select id="appCmdKey" style="min-width:220px"><option value="">— select app —</option></select>' +
-                '<button class="btn" id="appCmdRun">▶ Run</button></div>' +
-                '<div id="appCmdDesc" class="muted" style="margin:2px 0 6px"></div>' +
-                '<div id="appCmdOut"></div></div>' +
+                '<div id="runDesc" class="muted" style="margin:2px 0 6px"></div>' +
+                '<div class="terminal" id="runOut">Ready. Select a command and execute.\n</div></div>' +
                 '<div class="card" style="margin-top:16px"><h3>Execution history</h3><div id="runHistory"></div></div>'
             );
+            this._cmdMeta = {};
+            const $sel = $('#runAction');
+            // Core services (protected Python runner whitelist).
             API.get('/runner/actions').then((r) => {
-                $('#runAction').html(r.data.map((a) => '<option>' + H.esc(a) + '</option>').join(''));
+                const opts = (r.data || []).map((a) => {
+                    this._cmdMeta['core:' + a] = { key: a, name: a, core: true };
+                    return '<option value="core:' + H.esc(a) + '">' + H.esc(a) + '</option>';
+                }).join('');
+                if (opts) { $sel.append('<optgroup label="Core services">' + opts + '</optgroup>'); }
             });
+            // App-declared commands — one optgroup per paired app, appended as
+            // each app's helper responds so a slow/down app can't block the rest.
+            API.get('/apps').then((r) => {
+                (r.data || []).filter((a) => a && a.slug && a.helper_url).forEach((app) => {
+                    API.get('/apps/' + app.id + '/commands').then((cr) => {
+                        const cmds = (cr.data && cr.data.commands) || [];
+                        if (!cmds.length) { return; }
+                        const opts = cmds.map((c) => {
+                            const val = 'app:' + app.id + ':' + c.key;
+                            this._cmdMeta[val] = { appId: app.id, key: c.key, name: c.name || c.key, description: c.description || '', params: c.params || [], dangerous: !!c.dangerous };
+                            return '<option value="' + H.esc(val) + '">' + H.esc(c.name || c.key) + (c.dangerous ? ' ⚠' : '') + '</option>';
+                        }).join('');
+                        $sel.append('<optgroup label="' + H.esc(app.name || app.slug) + '">' + opts + '</optgroup>');
+                    }).catch(() => {});
+                });
+            });
+            $sel.on('change', () => this.describe());
             $('#runExec').on('click', () => this.exec());
-            this.loadApps();
-            $('#appCmdApp').on('change', () => this.loadCommands());
-            $('#appCmdKey').on('change', () => this.describeCommand());
-            $('#appCmdRun').on('click', () => this.runAppCommand());
             this.history();
         },
-        _appCommands: [],
-        loadApps() {
-            API.get('/apps').then((r) => {
-                const apps = (r.data || []).filter((a) => a && a.slug && a.helper_url);
-                $('#appCmdApp').html('<option value="">— select app —</option>' +
-                    apps.map((a) => '<option value="' + a.id + '">' + H.esc(a.name || a.slug) + '</option>').join(''));
-            });
-        },
-        loadCommands() {
-            const id = $('#appCmdApp').val();
-            this._appCommands = [];
-            $('#appCmdDesc').text('');
-            if (!id) { $('#appCmdKey').html('<option value="">— select app —</option>'); return; }
-            $('#appCmdKey').html('<option value="">loading…</option>');
-            API.get('/apps/' + id + '/commands').then((r) => {
-                const cmds = (r.data && r.data.commands) || [];
-                this._appCommands = cmds;
-                if (!cmds.length) {
-                    $('#appCmdKey').html('<option value="">— none declared —</option>');
-                    $('#appCmdDesc').text(r.data && r.data.error ? r.data.error : 'This app declares no commands.');
-                    return;
-                }
-                $('#appCmdKey').html('<option value="">— select command —</option>' +
-                    cmds.map((c) => '<option value="' + H.esc(c.key) + '">' + H.esc(c.name || c.key) + (c.dangerous ? ' ⚠' : '') + '</option>').join(''));
-            }).catch(() => { $('#appCmdKey').html('<option value="">— unavailable —</option>'); });
-        },
-        describeCommand() {
-            const key = $('#appCmdKey').val();
-            const cmd = this._appCommands.find((c) => c.key === key);
-            $('#appCmdDesc').text(cmd && cmd.description ? cmd.description : '');
-        },
-        runAppCommand() {
-            if (!SM.admin) { UI.toast('warn', 'Admin required'); return; }
-            const id = $('#appCmdApp').val();
-            const key = $('#appCmdKey').val();
-            if (!id || !key) { UI.toast('warn', 'Select an app and command'); return; }
-            const cmd = this._appCommands.find((c) => c.key === key) || { key: key, name: key, params: [] };
-            const params = Array.isArray(cmd.params) ? cmd.params : [];
-            const run = (args) => {
-                const $out = $('#appCmdOut');
-                $out.prepend($('<div class="terminal"></div>').append($('<div class="cmd"></div>').text('$ ' + key + ' ' + JSON.stringify(args || {}))));
-                const $term = $out.children().first();
-                API.post('/apps/' + id + '/command', { command: key, args: args || {} }).then((res) => {
-                    const r = res.data || {};
-                    if (r.ok) {
-                        const result = r.result || {};
-                        const out = result.output != null ? result.output : (result.message != null ? result.message : JSON.stringify(result, null, 2));
-                        $term.append($('<div class="ok"></div>').text('ok'));
-                        $term.append(document.createTextNode(String(out) + '\n'));
-                    } else {
-                        $term.append($('<div class="err"></div>').text(r.error || 'command failed'));
-                    }
-                }).catch(() => $term.append($('<div class="err"></div>').text('command failed')));
-            };
-            if (params.length) {
-                const fields = params.map((p) => '<div class="field"><label>' + H.esc(p.label || p.name) + (p.required ? ' *' : '') + '</label>' +
-                    (p.type === 'bool'
-                        ? '<select name="' + H.esc(p.name) + '"><option value="true"' + (p.default ? ' selected' : '') + '>true</option><option value="false"' + (!p.default ? ' selected' : '') + '>false</option></select>'
-                        : '<input name="' + H.esc(p.name) + '" value="' + H.esc(p.default != null ? String(p.default) : '') + '">') + '</div>').join('');
-                UI.modal(cmd.name || key, (cmd.description ? '<p class="muted">' + H.esc(cmd.description) + '</p>' : '') + fields, (d, close) => {
-                    const args = {};
-                    params.forEach((p) => { let v = d[p.name]; if (p.type === 'bool') { v = (v === 'true' || v === true); } args[p.name] = v; });
-                    close();
-                    run(args);
-                }, 'Run');
-            } else if (cmd.dangerous) {
-                UI.confirm('Run “' + (cmd.name || key) + '”?', () => run({}));
-            } else {
-                run({});
-            }
+        describe() {
+            const meta = this._cmdMeta[$('#runAction').val()];
+            if (!meta || meta.core) { $('#runDesc').text(''); return; }
+            const params = (meta.params || []).map((p) => p.name + (p.type ? ':' + p.type : '')).join(', ');
+            $('#runDesc').text((meta.description || '') + (params ? '  ·  args: ' + params : ''));
         },
         exec() {
             if (!SM.admin) { UI.toast('warn', 'Admin required'); return; }
-            const action = $('#runAction').val();
+            const val = $('#runAction').val();
+            if (!val) { UI.toast('warn', 'Select a command'); return; }
             let args = {};
             const raw = $('#runArgs').val().trim();
             if (raw) { try { args = JSON.parse(raw); } catch (e) { UI.toast('error', 'Invalid JSON args'); return; } }
             const $out = $('#runOut');
+            const meta = this._cmdMeta[val] || {};
+
+            // App-declared command → app helper.
+            if (val.indexOf('app:') === 0) {
+                const rest = val.slice(4);
+                const sep = rest.indexOf(':');
+                const appId = rest.slice(0, sep);
+                const key = rest.slice(sep + 1);
+                $out.append($('<div class="cmd"></div>').text('$ ' + (meta.name || key) + ' ' + raw));
+                API.post('/apps/' + appId + '/command', { command: key, args: args }).then((r) => {
+                    const d = r.data || {};
+                    if (d.ok) {
+                        const result = d.result || {};
+                        const o = result.output != null ? result.output : (result.message != null ? result.message : JSON.stringify(result, null, 2));
+                        $out.append($('<div class="ok"></div>').text('ok'));
+                        if (o != null && String(o) !== '') { $out.append(document.createTextNode(String(o) + '\n')); }
+                    } else {
+                        $out.append($('<div class="err"></div>').text(d.error || 'command failed'));
+                    }
+                    $out[0].scrollTop = $out[0].scrollHeight;
+                    this.history();
+                }).catch(() => { $out.append($('<div class="err"></div>').text('command failed')); });
+                return;
+            }
+
+            // Core service action → protected Python runner.
+            const action = val.indexOf('core:') === 0 ? val.slice(5) : val;
             $out.append($('<div class="cmd"></div>').text('$ ' + action + ' ' + raw));
             API.post('/runner/exec', { action: action, args: args }).then((r) => {
                 const d = r.data;
