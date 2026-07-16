@@ -347,9 +347,9 @@ final class TrafficAnalyzer
      * Full payload for the map: the server location plus one entry per source
      * IP with geo, network and volume, ready to draw arcs from origin->server.
      */
-    public static function mapData(int $hours = 24): array
+    public static function mapData(int $hours = 24, array $filter = []): array
     {
-        $rows = self::sourceAggregate($hours);
+        $rows = self::sourceAggregate($hours, $filter);
 
         $sources = [];
         foreach ($rows as $r) {
@@ -387,53 +387,58 @@ final class TrafficAnalyzer
     }
 
     /** Top sources by volume with ISP / country / top URL. */
-    public static function topSources(int $hours = 24, int $limit = 25): array
+    public static function topSources(int $hours = 24, int $limit = 25, array $filter = []): array
     {
-        $rows = self::sourceAggregate($hours);
+        $rows = self::sourceAggregate($hours, $filter);
         usort($rows, static fn ($a, $b) => (int) $b['bytes'] <=> (int) $a['bytes']);
         return array_slice($rows, 0, max(1, $limit));
     }
 
     /** Volume + request totals grouped by country. */
-    public static function byCountry(int $hours = 24, int $limit = 25): array
+    public static function byCountry(int $hours = 24, int $limit = 25, array $filter = []): array
     {
         $hours = self::clampHours($hours);
         $limit = max(1, min($limit, 500));
+        $f = self::buildFilter($filter);
         return Database::instance()->all(
             "SELECT COALESCE(g.country, 'Unknown') AS country, g.country_code,
                     SUM(t.requests) AS requests, SUM(t.bytes) AS bytes,
                     COUNT(DISTINCT t.src_ip) AS sources
              FROM traffic_events t
              LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
-             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR){$f['sql']}
              GROUP BY country, g.country_code
              ORDER BY bytes DESC
-             LIMIT {$limit}"
+             LIMIT {$limit}",
+            $f['params']
         );
     }
 
     /** Volume grouped by ISP / owning network. */
-    public static function byIsp(int $hours = 24, int $limit = 25): array
+    public static function byIsp(int $hours = 24, int $limit = 25, array $filter = []): array
     {
         $hours = self::clampHours($hours);
         $limit = max(1, min($limit, 500));
+        $f = self::buildFilter($filter);
         return Database::instance()->all(
             "SELECT COALESCE(g.isp, 'Unknown') AS isp, g.asn,
                     SUM(t.requests) AS requests, SUM(t.bytes) AS bytes,
                     COUNT(DISTINCT t.src_ip) AS sources
              FROM traffic_events t
              LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
-             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR){$f['sql']}
              GROUP BY isp, g.asn
              ORDER BY bytes DESC
-             LIMIT {$limit}"
+             LIMIT {$limit}",
+            $f['params']
         );
     }
 
     /** Volume grouped by managed app (kind = app / host attribution). */
-    public static function byApp(int $hours = 24): array
+    public static function byApp(int $hours = 24, array $filter = []): array
     {
         $hours = self::clampHours($hours);
+        $f = self::buildFilter($filter);
         return Database::instance()->all(
             "SELECT COALESCE(t.app_slug, t.host, 'server') AS app,
                     t.app_id,
@@ -441,34 +446,40 @@ final class TrafficAnalyzer
                     SUM(t.errors) AS errors,
                     COUNT(DISTINCT t.src_ip) AS sources
              FROM traffic_events t
+             LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
              WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
-               AND t.kind IN ('allow','app')
+               AND t.kind IN ('allow','app'){$f['sql']}
              GROUP BY app, t.app_id
-             ORDER BY bytes DESC"
+             ORDER BY bytes DESC",
+            $f['params']
         );
     }
 
     /** Headline counters for the top of the traffic view. */
-    public static function summary(int $hours = 24): array
+    public static function summary(int $hours = 24, array $filter = []): array
     {
         $hours = self::clampHours($hours);
+        $f = self::buildFilter($filter);
         $db = Database::instance();
         $row = $db->one(
             "SELECT
-                SUM(CASE WHEN kind IN ('allow','app') THEN requests ELSE 0 END) AS allowed_requests,
-                SUM(CASE WHEN kind IN ('allow','app') THEN bytes ELSE 0 END)    AS allowed_bytes,
-                SUM(CASE WHEN kind = 'block' THEN requests ELSE 0 END)          AS blocked_packets,
-                SUM(CASE WHEN kind = 'block' THEN bytes ELSE 0 END)             AS blocked_bytes,
-                SUM(errors) AS errors,
-                COUNT(DISTINCT src_ip) AS sources
-             FROM traffic_events
-             WHERE created_at >= (NOW() - INTERVAL {$hours} HOUR)"
+                SUM(CASE WHEN t.kind IN ('allow','app') THEN t.requests ELSE 0 END) AS allowed_requests,
+                SUM(CASE WHEN t.kind IN ('allow','app') THEN t.bytes ELSE 0 END)    AS allowed_bytes,
+                SUM(CASE WHEN t.kind = 'block' THEN t.requests ELSE 0 END)          AS blocked_packets,
+                SUM(CASE WHEN t.kind = 'block' THEN t.bytes ELSE 0 END)             AS blocked_bytes,
+                SUM(t.errors) AS errors,
+                COUNT(DISTINCT t.src_ip) AS sources
+             FROM traffic_events t
+             LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR){$f['sql']}",
+            $f['params']
         ) ?? [];
 
         $countries = (int) $db->scalar(
             "SELECT COUNT(DISTINCT g.country_code)
              FROM traffic_events t JOIN geo_cache g ON g.ip_address = t.src_ip
-             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR) AND g.country_code IS NOT NULL"
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR) AND g.country_code IS NOT NULL{$f['sql']}",
+            $f['params']
         );
 
         return [
@@ -491,6 +502,113 @@ final class TrafficAnalyzer
             "SELECT * FROM app_log_events WHERE app_id = ? ORDER BY id DESC LIMIT {$limit}",
             [$appId]
         );
+    }
+
+    /**
+     * Full drill-down for a single application (identified by its app-slug,
+     * host, or the literal 'server'): managed-app metadata, activity totals,
+     * top source IPs (with geo + network flags), country breakdown, top
+     * endpoints, and recent request log lines. Powers the app detail panel.
+     */
+    public static function appDetail(string $appKey, int $hours = 24): array
+    {
+        $hours = self::clampHours($hours);
+        $db    = Database::instance();
+        $match = "COALESCE(NULLIF(t.app_slug, ''), NULLIF(t.host, ''), 'server') = ?";
+
+        $meta = $db->one(
+            'SELECT id, name, slug, domain, status, last_health, last_checked
+             FROM managed_apps WHERE slug = ? LIMIT 1',
+            [$appKey]
+        );
+
+        $act = $db->one(
+            "SELECT
+                SUM(CASE WHEN t.kind IN ('allow','app') THEN t.requests ELSE 0 END) AS requests,
+                SUM(CASE WHEN t.kind IN ('allow','app') THEN t.bytes ELSE 0 END)    AS bytes,
+                SUM(t.errors) AS errors,
+                COUNT(DISTINCT t.src_ip) AS sources,
+                MIN(t.created_at) AS first_seen, MAX(t.created_at) AS last_seen
+             FROM traffic_events t
+             WHERE {$match} AND t.created_at >= (NOW() - INTERVAL {$hours} HOUR)",
+            [$appKey]
+        ) ?? [];
+
+        $sources = $db->all(
+            "SELECT t.src_ip,
+                    SUM(CASE WHEN t.kind IN ('allow','app') THEN t.requests ELSE 0 END) AS requests,
+                    SUM(t.bytes) AS bytes, SUM(t.errors) AS errors,
+                    SUM(CASE WHEN t.kind = 'block' THEN t.bytes ELSE 0 END) AS blocked_bytes,
+                    g.country, g.country_code, g.city, g.isp, g.org, g.asn,
+                    g.hosting, g.proxy, g.mobile,
+                    EXISTS(SELECT 1 FROM blocked_hosts b WHERE b.ip_address = t.src_ip) AS ever_blocked
+             FROM traffic_events t
+             LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
+             WHERE {$match} AND t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             GROUP BY t.src_ip, g.country, g.country_code, g.city, g.isp, g.org, g.asn,
+                      g.hosting, g.proxy, g.mobile
+             ORDER BY bytes DESC LIMIT 50",
+            [$appKey]
+        );
+        foreach ($sources as &$r) {
+            $net = self::classifyNetwork($r);
+            $r['is_datacenter'] = $net['is_datacenter'];
+            $r['is_proxy']      = $net['is_proxy'];
+            $r['is_mobile']     = $net['is_mobile'];
+            $r['ever_blocked']  = (int) ($r['ever_blocked'] ?? 0) > 0;
+        }
+        unset($r);
+
+        $countries = $db->all(
+            "SELECT COALESCE(g.country, 'Unknown') AS country, g.country_code,
+                    COUNT(DISTINCT t.src_ip) AS sources,
+                    SUM(t.requests) AS requests, SUM(t.bytes) AS bytes
+             FROM traffic_events t
+             LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
+             WHERE {$match} AND t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             GROUP BY country, g.country_code
+             ORDER BY bytes DESC LIMIT 30",
+            [$appKey]
+        );
+
+        $endpoints = $db->all(
+            "SELECT t.top_path AS path, t.method, MAX(t.status_sample) AS status,
+                    SUM(t.requests) AS requests, SUM(t.bytes) AS bytes, SUM(t.errors) AS errors
+             FROM traffic_events t
+             WHERE {$match} AND t.top_path IS NOT NULL AND t.top_path <> ''
+               AND t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             GROUP BY t.top_path, t.method
+             ORDER BY requests DESC LIMIT 50",
+            [$appKey]
+        );
+
+        $recent = [];
+        if ($meta) {
+            $recent = $db->all(
+                "SELECT method, path, status_code, bytes, level, message, src_ip,
+                        COALESCE(logged_at, created_at) AS at
+                 FROM app_log_events WHERE app_id = ? ORDER BY id DESC LIMIT 40",
+                [(int) $meta['id']]
+            );
+        }
+
+        return [
+            'app'  => $appKey,
+            'meta' => $meta ?: null,
+            'activity' => [
+                'requests'   => (int) ($act['requests'] ?? 0),
+                'bytes'      => (int) ($act['bytes'] ?? 0),
+                'errors'     => (int) ($act['errors'] ?? 0),
+                'sources'    => (int) ($act['sources'] ?? 0),
+                'first_seen' => $act['first_seen'] ?? null,
+                'last_seen'  => $act['last_seen'] ?? null,
+            ],
+            'sources'      => $sources,
+            'countries'    => $countries,
+            'endpoints'    => $endpoints,
+            'recent'       => $recent,
+            'window_hours' => $hours,
+        ];
     }
 
     // =================================================================
@@ -797,9 +915,10 @@ final class TrafficAnalyzer
      * Per-source rollup joined to geo, including a blocked-bytes column and the
      * list of apps each IP touched. Shared by mapData / topSources.
      */
-    private static function sourceAggregate(int $hours): array
+    private static function sourceAggregate(int $hours, array $filter = []): array
     {
         $hours = self::clampHours($hours);
+        $f = self::buildFilter($filter);
         $rows = Database::instance()->all(
             "SELECT t.src_ip,
                     SUM(t.requests) AS requests,
@@ -812,10 +931,11 @@ final class TrafficAnalyzer
                     g.hosting, g.proxy, g.mobile, g.lat, g.lng
              FROM traffic_events t
              LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
-             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR){$f['sql']}
              GROUP BY t.src_ip, g.country, g.country_code, g.city, g.isp, g.org, g.asn,
                       g.hosting, g.proxy, g.mobile, g.lat, g.lng
-             ORDER BY bytes DESC"
+             ORDER BY bytes DESC",
+            $f['params']
         );
         foreach ($rows as &$r) {
             $net = self::classifyNetwork($r);
@@ -825,6 +945,84 @@ final class TrafficAnalyzer
         }
         unset($r);
         return $rows;
+    }
+
+    /**
+     * Translate UI filter tags into an extra WHERE fragment combined with
+     * boolean AND / OR. Predicates reference the base table alias `t` and the
+     * geo_cache alias `g`, so every query that uses this MUST join geo_cache
+     * as `g` and alias traffic_events as `t`.
+     *
+     * @param array $filter ['tags' => [['t'=>type,'v'=>value], ...], 'logic' => 'and'|'or']
+     * @return array{sql:string, params:array} sql starts with " AND ( ... )" or ''
+     */
+    private static function buildFilter(array $filter): array
+    {
+        $tags  = isset($filter['tags']) && is_array($filter['tags']) ? $filter['tags'] : [];
+        $logic = (isset($filter['logic']) && strtolower((string) $filter['logic']) === 'or') ? 'or' : 'and';
+
+        $preds  = [];
+        $params = [];
+        foreach ($tags as $tag) {
+            if (!is_array($tag)) {
+                continue;
+            }
+            $type = strtolower(trim((string) ($tag['t'] ?? '')));
+            $val  = trim((string) ($tag['v'] ?? ''));
+            switch ($type) {
+                case 'ip':
+                    if (is_valid_ip($val)) {
+                        $preds[]  = 't.src_ip = ?';
+                        $params[] = $val;
+                    }
+                    break;
+                case 'country':
+                    if ($val === '' || strcasecmp($val, 'Unknown') === 0) {
+                        $preds[] = 'g.country_code IS NULL';
+                    } else {
+                        $preds[]  = 'g.country_code = ?';
+                        $params[] = strtoupper(substr($val, 0, 2));
+                    }
+                    break;
+                case 'isp':
+                    if ($val === '' || strcasecmp($val, 'Unknown') === 0) {
+                        $preds[] = "(g.isp IS NULL OR g.isp = '')";
+                    } else {
+                        $preds[]  = 'g.isp = ?';
+                        $params[] = $val;
+                    }
+                    break;
+                case 'app':
+                    if ($val !== '') {
+                        $preds[]  = "COALESCE(NULLIF(t.app_slug, ''), NULLIF(t.host, ''), 'server') = ?";
+                        $params[] = $val;
+                    }
+                    break;
+                case 'flag':
+                    switch (strtolower($val)) {
+                        case 'datacenter':
+                        case 'dc':
+                            $preds[] = 'g.hosting = 1';
+                            break;
+                        case 'proxy':
+                            $preds[] = 'g.proxy = 1';
+                            break;
+                        case 'mobile':
+                            $preds[] = 'g.mobile = 1';
+                            break;
+                        case 'blocked':
+                            $preds[] = 'EXISTS (SELECT 1 FROM blocked_hosts b WHERE b.ip_address = t.src_ip)';
+                            break;
+                    }
+                    break;
+            }
+        }
+
+        if (!$preds) {
+            return ['sql' => '', 'params' => []];
+        }
+        $glue = $logic === 'or' ? ' OR ' : ' AND ';
+        return ['sql' => ' AND (' . implode($glue, $preds) . ')', 'params' => $params];
     }
 
     /** Clamp an hours window to a sane, safe integer for inlining into SQL. */

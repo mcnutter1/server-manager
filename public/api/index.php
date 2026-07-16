@@ -306,28 +306,43 @@ $get('/apps/(?<id>\d+)/logs', static function ($p) {
 // =====================================================================
 // Traffic map (geo + flows, stitched from apache + firewall + app logs)
 // =====================================================================
-$get('/traffic/map', static function () {
-    Response::ok(TrafficAnalyzer::mapData((int) ($_GET['hours'] ?? 24)));
+// Parse the UI filter-bar tags (`tags` = JSON array of {t,v}) and boolean
+// `logic` (and|or) into the shape TrafficAnalyzer expects.
+$trafficFilter = static function (): array {
+    $tags = [];
+    $raw  = $_GET['tags'] ?? '';
+    if (is_string($raw) && $raw !== '') {
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded)) {
+            $tags = $decoded;
+        }
+    }
+    $logic = strtolower((string) ($_GET['logic'] ?? 'and')) === 'or' ? 'or' : 'and';
+    return ['tags' => $tags, 'logic' => $logic];
+};
+
+$get('/traffic/map', static function () use ($trafficFilter) {
+    Response::ok(TrafficAnalyzer::mapData((int) ($_GET['hours'] ?? 24), $trafficFilter()));
 });
 
-$get('/traffic/summary', static function () {
-    Response::ok(TrafficAnalyzer::summary((int) ($_GET['hours'] ?? 24)));
+$get('/traffic/summary', static function () use ($trafficFilter) {
+    Response::ok(TrafficAnalyzer::summary((int) ($_GET['hours'] ?? 24), $trafficFilter()));
 });
 
-$get('/traffic/sources', static function () {
-    Response::ok(TrafficAnalyzer::topSources((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25)));
+$get('/traffic/sources', static function () use ($trafficFilter) {
+    Response::ok(TrafficAnalyzer::topSources((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25), $trafficFilter()));
 });
 
-$get('/traffic/countries', static function () {
-    Response::ok(TrafficAnalyzer::byCountry((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25)));
+$get('/traffic/countries', static function () use ($trafficFilter) {
+    Response::ok(TrafficAnalyzer::byCountry((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25), $trafficFilter()));
 });
 
-$get('/traffic/isps', static function () {
-    Response::ok(TrafficAnalyzer::byIsp((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25)));
+$get('/traffic/isps', static function () use ($trafficFilter) {
+    Response::ok(TrafficAnalyzer::byIsp((int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 25), $trafficFilter()));
 });
 
-$get('/traffic/apps', static function () {
-    Response::ok(TrafficAnalyzer::byApp((int) ($_GET['hours'] ?? 24)));
+$get('/traffic/apps', static function () use ($trafficFilter) {
+    Response::ok(TrafficAnalyzer::byApp((int) ($_GET['hours'] ?? 24), $trafficFilter()));
 });
 
 // Entity drill-downs: IP -> services/ports/apps, ISP -> IPs, country -> ISPs.
@@ -338,6 +353,15 @@ $get('/traffic/ip', static function () {
     }
     Response::ok(TrafficAnalyzer::ipDetail($ip, (int) ($_GET['hours'] ?? 24)));
 });
+
+$get('/traffic/app', static function () {
+    $app = trim((string) ($_GET['app'] ?? ''));
+    if ($app === '') {
+        Response::error('an app parameter is required', 400);
+    }
+    Response::ok(TrafficAnalyzer::appDetail($app, (int) ($_GET['hours'] ?? 24)));
+});
+
 
 $get('/traffic/isp', static function () {
     $isp = trim((string) ($_GET['isp'] ?? ''));

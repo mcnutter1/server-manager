@@ -422,11 +422,32 @@ final class AppManager
             $result['checks']['helper'] = $helper;
             $status = $helper['status'] ?? 'healthy';
             $overall = $status === 'ok' || $status === 'healthy' ? 'healthy' : 'degraded';
+
+            // Enrich the report with what the app reports about itself: its
+            // version and any counters it exposes ("elements reported on").
+            $ver = self::callHelper($app, 'version');
+            if ($ver['ok'] && is_array($ver['data'])) {
+                $result['checks']['version'] = $ver['data']['version'] ?? ($ver['data'] ?: null);
+            }
+            $stats = self::callHelper($app, 'stats');
+            if ($stats['ok'] && is_array($stats['data']) && $stats['data']) {
+                $result['checks']['stats'] = $stats['data'];
+            }
         } elseif (empty($app['health_url'])) {
             // No HTTP probe and the helper failed → surface the failure.
             $result['checks']['helper_error'] = $helperCall['error'] ?? 'helper unreachable';
             $overall = 'unhealthy';
         }
+
+        // A quick summary of what this check actually covered.
+        $result['checks']['summary'] = [
+            'probes'     => array_values(array_intersect(
+                ['http', 'helper', 'version', 'stats'],
+                array_keys($result['checks'])
+            )),
+            'elements'   => is_array($helper) ? count($helper) : 0,
+            'stat_keys'  => isset($result['checks']['stats']) ? count($result['checks']['stats']) : 0,
+        ];
 
         $db = Database::instance();
         $db->exec(
@@ -513,6 +534,29 @@ final class AppManager
             return ['ok' => false, 'error' => 'not found'];
         }
         $interval = (int) config('app.health_interval_min', 5);
+        $db = Database::instance();
+
+        // Summarise the app's own log stream (pulled by the traffic worker into
+        // app_log_events) so the report can show how many logs were seen and
+        // what kind of activity was reported on.
+        $logs = [
+            'total_24h'  => (int) $db->scalar(
+                'SELECT COUNT(*) FROM app_log_events WHERE app_id = ? AND created_at >= (NOW() - INTERVAL 24 HOUR)',
+                [$id]
+            ),
+            'errors_24h' => (int) $db->scalar(
+                'SELECT COUNT(*) FROM app_log_events WHERE app_id = ? AND status_code >= 500 AND created_at >= (NOW() - INTERVAL 24 HOUR)',
+                [$id]
+            ),
+            'by_level'   => $db->all(
+                "SELECT COALESCE(NULLIF(level,''),'—') AS level, COUNT(*) AS count
+                 FROM app_log_events WHERE app_id = ? AND created_at >= (NOW() - INTERVAL 24 HOUR)
+                 GROUP BY level ORDER BY count DESC LIMIT 8",
+                [$id]
+            ),
+            'last_logged' => $db->scalar('SELECT MAX(logged_at) FROM app_log_events WHERE app_id = ?', [$id]),
+        ];
+
         return [
             'ok'   => true,
             'app'  => [
@@ -521,6 +565,8 @@ final class AppManager
                 'slug'         => $app['slug'],
                 'status'       => $app['status'],
                 'health_url'   => $app['health_url'] ?? null,
+                'helper_url'   => $app['helper_url'] ?? null,
+                'domain'       => $app['domain'] ?? null,
                 'last_health'  => $app['last_health'] ?? null,
                 'last_checked' => $app['last_checked'] ?? null,
             ],
@@ -529,6 +575,7 @@ final class AppManager
                 'interval_min' => $interval,
                 'source'       => 'monitor worker (bin/collect-metrics.php)',
             ],
+            'logs'    => $logs,
             'history' => self::healthHistory($id, $historyLimit),
         ];
     }
@@ -543,13 +590,32 @@ final class AppManager
             CURLOPT_FOLLOWLOCATION => true,
         ]);
         $start = microtime(true);
-        curl_exec($ch);
-        $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $body  = curl_exec($ch);
+        $info  = curl_getinfo($ch);
+        $err   = curl_error($ch);
         curl_close($ch);
+
+        $code  = (int) ($info['http_code'] ?? 0);
+        $body  = is_string($body) ? $body : '';
+        $ctype = trim((string) ($info['content_type'] ?? ''));
+
+        // Keep a short, human-readable snippet of the response body so the
+        // report shows *what* the endpoint actually returned.
+        $snippet = null;
+        if ($body !== '') {
+            $clean = trim(preg_replace('/\s+/', ' ', strip_tags($body)) ?? '');
+            $snippet = mb_substr($clean, 0, 500);
+        }
+
         return [
-            'ok'      => $code >= 200 && $code < 400,
-            'status'  => $code,
-            'time_ms' => (int) round((microtime(true) - $start) * 1000),
+            'ok'           => $code >= 200 && $code < 400,
+            'status'       => $code,
+            'time_ms'      => (int) round((microtime(true) - $start) * 1000),
+            'content_type' => $ctype ?: null,
+            'size_bytes'   => (int) ($info['size_download'] ?? strlen($body)),
+            'redirects'    => (int) ($info['redirect_count'] ?? 0),
+            'body_snippet' => $snippet,
+            'error'        => $err ?: null,
         ];
     }
 

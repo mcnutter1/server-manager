@@ -238,11 +238,37 @@ tr.clickable:hover td { background: rgba(79, 140, 255, .08); }
 .badge.flag { background: rgba(255, 89, 100, .16); color: var(--crit); }
 .badge.clean { background: rgba(46, 204, 113, .16); color: var(--good); }
 
+/* traffic tag filter bar */
+.filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 4px; min-height: 30px; }
+.filter-bar .fhint { color: var(--muted); font-size: 12.5px; }
+.filter-bar .flabel { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); font-weight: 600; }
+.filter-bar .fchip { display: inline-flex; align-items: center; gap: 6px; background: var(--panel-2, rgba(255,255,255,.03)); border: 1px solid var(--border); border-radius: 999px; padding: 3px 6px 3px 10px; font-size: 12.5px; max-width: 260px; }
+.filter-bar .fchip .fico { opacity: .8; }
+.filter-bar .fchip .ftxt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filter-bar .fchip .frm { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; border-radius: 50%; }
+.filter-bar .fchip .frm:hover { color: var(--crit); }
+.filter-bar .fchip-flag { border-color: rgba(245, 166, 35, .4); }
+.filter-bar .flogic { border: 1px solid var(--brand-2); background: rgba(79, 140, 255, .12); color: var(--brand-2); font-size: 11px; font-weight: 700; letter-spacing: .5px; border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.filter-bar .flogic:hover { background: rgba(79, 140, 255, .22); }
+.filter-bar .fclear { border: 1px solid var(--border); background: transparent; color: var(--muted); font-size: 12px; border-radius: 6px; padding: 3px 10px; cursor: pointer; margin-left: 4px; }
+.filter-bar .fclear:hover { color: var(--crit); border-color: var(--crit); }
+
+/* inline 🏷 tag-add button on table rows */
+.tagbtn { border: 0; background: transparent; cursor: pointer; opacity: 0; font-size: 12px; padding: 0 2px; margin-left: 4px; vertical-align: middle; transition: opacity .12s; }
+tr:hover .tagbtn { opacity: .55; }
+.tagbtn:hover { opacity: 1 !important; }
+/* network-type badges rendered as filter buttons */
+.badge.tagflag { border: 0; cursor: pointer; font: inherit; }
+.badge.tagflag:hover { filter: brightness(1.25); }
+
 /* health report modal key/value blocks */
 .kv-block { margin-bottom: 14px; }
 .kv-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
 table.data.kv th { width: 42%; color: var(--muted); font-weight: 500; text-align: left; }
 table.data.kv td { word-break: break-word; }
+pre.payload { background: var(--panel-2, rgba(0,0,0,.25)); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 6px 0 0; font-size: 12px; line-height: 1.5; max-height: 260px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: var(--text, #cdd6e0); }
+.adv-toggle { cursor: pointer; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; user-select: none; }
+.adv-toggle:hover { color: var(--text, #e6edf3); }
 
 /* ---------------- Chart ---------------- */
 .chart-box { position: relative; height: 240px; }

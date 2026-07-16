@@ -16,7 +16,18 @@ final class Response
             header('Content-Type: application/json; charset=utf-8');
             header('X-Content-Type-Options: nosniff');
         }
-        echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        // Raw log lines and request paths pulled from apps can contain bytes
+        // that are not valid UTF-8. Substitute them instead of letting
+        // json_encode() fail and emit an empty body (which the client then
+        // reports as a generic "API error").
+        $flags = JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT
+            | JSON_INVALID_UTF8_SUBSTITUTE | JSON_PARTIAL_OUTPUT_ON_ERROR;
+        $out = json_encode($data, $flags);
+        if ($out === false) {
+            $out = json_encode(['ok' => false, 'error' => 'response encoding failed'], $flags)
+                ?: '{"ok":false,"error":"response encoding failed"}';
+        }
+        echo $out;
         exit;
     }
 

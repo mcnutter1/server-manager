@@ -436,6 +436,7 @@
         _map: null,
         _layer: null,
         _hours: 24,
+        _filter: { tags: [], logic: 'and' },
         render($el) {
             // The container is rebuilt on every render, so drop any stale map.
             if (this._map) { try { this._map.remove(); } catch (e) {} this._map = null; this._layer = null; }
@@ -448,6 +449,7 @@
                 '  </select>' +
                 (SM.admin ? '<button class="btn ghost" id="trIngest">⟳ Ingest now</button>' : '') +
                 '</div></div>' +
+                '<div class="filter-bar" id="trFilter"></div>' +
                 '<div class="grid cols-4" id="trStats"></div>' +
                 '<div class="card" style="margin-top:16px;padding:0;overflow:hidden">' +
                 '  <div id="trMap" style="height:440px;width:100%;background:#0d1526"></div></div>' +
@@ -457,7 +459,7 @@
                 '</div>' +
                 '<div class="grid cols-2" style="margin-top:16px">' +
                 '  <div class="card"><h3>By ISP / network <span class="sub">click → IPs → detail</span></h3><div id="trIsps"></div></div>' +
-                '  <div class="card"><h3>By application</h3><div id="trApps"></div></div>' +
+                '  <div class="card"><h3>By application <span class="sub">click a row → sources · endpoints</span></h3><div id="trApps"></div></div>' +
                 '</div>'
             );
             $('#trHours').val(String(this._hours)).on('change', () => {
@@ -478,18 +480,31 @@
                     this.load();
                 }).catch(() => UI.toast('error', 'Ingest failed'));
             });
+            this.renderFilterBar();
             this.initMap();
             this.load();
-            // Delegated drill-down: click any IP / country / ISP row to open its detail.
+            // Delegated drill-down: click any IP / country / ISP / app row to open its detail.
             $el.on('click', 'tr[data-drill]', (e) => {
                 const $tr = $(e.currentTarget);
                 const kind = $tr.data('drill');
-                const x = (kind === 'ip' ? this._sources : kind === 'country' ? this._countries : this._isps)[Number($tr.data('idx'))];
+                const arr = kind === 'ip' ? this._sources : kind === 'country' ? this._countries
+                    : kind === 'isp' ? this._isps : this._apps;
+                const x = (arr || [])[Number($tr.data('idx'))];
                 if (!x) { return; }
                 if (kind === 'ip') { this.drill.openIp(x.src_ip); }
                 else if (kind === 'country') { this.drill.openCountry(x.country_code, x.country); }
                 else if (kind === 'isp') { this.drill.openIsp(x.isp); }
+                else if (kind === 'app') { this.drill.openApp(x.app); }
             });
+            // Delegated tag-add: clicking a 🏷 / flag badge pins a filter tag.
+            this.bindTagClicks($el);
+            // Delegated filter-bar controls (chip remove, logic toggle, clear).
+            $el.on('click', '#trFilter [data-rm]', (e) => {
+                e.stopPropagation();
+                this.removeTag(Number($(e.currentTarget).data('rm')));
+            });
+            $el.on('click', '#trFilter [data-logic]', () => this.toggleLogic());
+            $el.on('click', '#trFilter [data-clear]', () => this.clearTags());
         },
         initMap() {
             if (typeof L === 'undefined') { return; }
@@ -505,7 +520,8 @@
         },
         load() {
             const hours = this._hours;
-            API.get('/traffic/summary?hours=' + hours).then((r) => {
+            const qs = this._qs();
+            API.get('/traffic/summary?hours=' + hours + qs).then((r) => {
                 const s = r.data;
                 $('#trStats').html(
                     statBox('Allowed requests', (s.allowed_requests || 0).toLocaleString()) +
@@ -515,54 +531,61 @@
                 );
             });
             this.loadMap(hours);
-            API.get('/traffic/sources?hours=' + hours + '&limit=25').then((r) => {
+            API.get('/traffic/sources?hours=' + hours + '&limit=25' + qs).then((r) => {
                 this._sources = r.data || [];
                 $('#trSources').html('<div class="table-wrap"><table class="data"><thead><tr>' +
                     '<th>IP</th><th>Country</th><th>ISP</th><th>Top URL</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
                     (this._sources.length ? this._sources.map((x, i) => (
-                        '<tr class="clickable" data-drill="ip" data-idx="' + i + '"><td class="mono">' + H.esc(x.src_ip) + this.tags(x) + '</td>' +
-                        '<td>' + H.esc(x.city ? x.city + ', ' : '') + H.esc(x.country || '—') + '</td>' +
-                        '<td class="muted">' + H.esc(x.isp || '—') + '</td>' +
+                        '<tr class="clickable" data-drill="ip" data-idx="' + i + '"><td class="mono">' + H.esc(x.src_ip) + this.tags(x) + this.tagBtn('ip', x.src_ip, x.src_ip) + '</td>' +
+                        '<td>' + H.esc(x.city ? x.city + ', ' : '') + H.esc(x.country || '—') + this.tagBtn('country', x.country_code || 'Unknown', x.country || 'Unknown') + '</td>' +
+                        '<td class="muted">' + H.esc(x.isp || '—') + this.tagBtn('isp', x.isp || 'Unknown', x.isp || 'Unknown') + '</td>' +
                         '<td class="mono" title="' + H.esc(x.apps || '') + '">' + H.esc((x.top_path || x.apps || '—')) + '</td>' +
                         '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
                         '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
                     )).join('') : '<tr><td colspan="6" class="muted">no traffic recorded yet</td></tr>') +
                     '</tbody></table></div>');
             });
-            API.get('/traffic/countries?hours=' + hours).then((r) => {
+            API.get('/traffic/countries?hours=' + hours + qs).then((r) => {
                 this._countries = r.data || [];
                 $('#trCountries').html('<div class="table-wrap"><table class="data"><thead><tr>' +
                     '<th>Country</th><th class="num">Sources</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
                     (this._countries.length ? this._countries.map((x, i) => (
-                        '<tr class="clickable" data-drill="country" data-idx="' + i + '"><td>' + H.esc(x.country || 'Unknown') + '</td>' +
+                        '<tr class="clickable" data-drill="country" data-idx="' + i + '"><td>' + H.esc(x.country || 'Unknown') + this.tagBtn('country', x.country_code || 'Unknown', x.country || 'Unknown') + '</td>' +
                         '<td class="mono">' + (Number(x.sources) || 0).toLocaleString() + '</td>' +
                         '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
                         '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
                     )).join('') : '<tr><td colspan="4" class="muted">no data</td></tr>') +
                     '</tbody></table></div>');
             });
-            API.get('/traffic/isps?hours=' + hours).then((r) => {
+            API.get('/traffic/isps?hours=' + hours + qs).then((r) => {
                 this._isps = r.data || [];
                 $('#trIsps').html('<div class="table-wrap"><table class="data"><thead><tr>' +
                     '<th>ISP / network</th><th class="num">Sources</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
                     (this._isps.length ? this._isps.map((x, i) => (
-                        '<tr class="clickable" data-drill="isp" data-idx="' + i + '"><td>' + H.esc(x.isp || 'Unknown') + '</td>' +
+                        '<tr class="clickable" data-drill="isp" data-idx="' + i + '"><td>' + H.esc(x.isp || 'Unknown') + this.tagBtn('isp', x.isp || 'Unknown', x.isp || 'Unknown') + '</td>' +
                         '<td class="mono">' + (Number(x.sources) || 0).toLocaleString() + '</td>' +
                         '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
                         '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
                     )).join('') : '<tr><td colspan="4" class="muted">no data</td></tr>') +
                     '</tbody></table></div>');
             });
-            API.get('/traffic/apps?hours=' + hours).then((r) => {
-                $('#trApps').html(this.simpleTable(r.data, [
-                    ['app', 'Application'], ['sources', 'Sources', true], ['requests', 'Reqs', true],
-                    ['errors', 'Errors', true], ['bytes', 'Volume', 'bytes']
-                ]));
+            API.get('/traffic/apps?hours=' + hours + qs).then((r) => {
+                this._apps = r.data || [];
+                $('#trApps').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Application</th><th class="num">Sources</th><th class="num">Reqs</th><th class="num">Errors</th><th class="num">Volume</th></tr></thead><tbody>' +
+                    (this._apps.length ? this._apps.map((x, i) => (
+                        '<tr class="clickable" data-drill="app" data-idx="' + i + '"><td>' + H.esc(x.app || 'server') + this.tagBtn('app', x.app || 'server', x.app || 'server') + '</td>' +
+                        '<td class="mono">' + (Number(x.sources) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + (Number(x.errors) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
+                    )).join('') : '<tr><td colspan="5" class="muted">no data</td></tr>') +
+                    '</tbody></table></div>');
             });
         },
         loadMap(hours) {
             if (!this._map) { return; }
-            API.get('/traffic/map?hours=' + hours).then((r) => {
+            API.get('/traffic/map?hours=' + hours + this._qs()).then((r) => {
                 const d = r.data, layer = this._layer;
                 layer.clearLayers();
                 const srv = d.server;
@@ -623,14 +646,93 @@
             return '<div class="table-wrap"><table class="data"><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>';
         },
 
+        // ---- Tag filter bar ------------------------------------------
+        // Query-string suffix carrying the active filter tags + boolean logic.
+        _qs() {
+            if (!this._filter.tags.length) { return ''; }
+            return '&tags=' + encodeURIComponent(JSON.stringify(this._filter.tags.map((t) => ({ t: t.t, v: t.v })))) +
+                '&logic=' + this._filter.logic;
+        },
+        // A small 🏷 button that pins a filter tag when clicked.
+        tagBtn(t, v, label, title) {
+            if (v == null || v === '') { return ''; }
+            return '<button class="tagbtn" title="' + H.esc(title || ('Filter by ' + label)) + '"' +
+                ' data-tagt="' + H.esc(t) + '" data-tagv="' + H.esc(String(v)) + '"' +
+                ' data-tagl="' + H.esc(String(label)) + '">&#127991;</button>';
+        },
+        // A network-type badge that doubles as a flag-filter button.
+        flagBadge(flag, label, cls) {
+            return ' <button class="badge ' + cls + ' tagflag" title="Filter by ' + H.esc(label) + '"' +
+                ' data-tagt="flag" data-tagv="' + H.esc(flag) + '" data-tagl="' + H.esc(label) + '">' + H.esc(label) + '</button>';
+        },
+        // Bind delegated clicks for every 🏷 / flag badge inside a container.
+        // Runs before row-drill handlers thanks to jQuery proximity ordering.
+        bindTagClicks($c) {
+            const self = this;
+            $c.on('click', '.tagbtn, .tagflag', function (e) {
+                e.stopPropagation();
+                e.preventDefault();
+                const d = this.dataset;
+                self.addTag(d.tagt, d.tagv, d.tagl);
+            });
+        },
+        addTag(t, v, label) {
+            if (!t || v == null || v === '') { return; }
+            const exists = this._filter.tags.some((x) => x.t === t && String(x.v) === String(v));
+            if (!exists) {
+                this._filter.tags.push({ t: t, v: String(v), label: label || String(v) });
+                this.renderFilterBar();
+                this.load();
+                UI.toast('info', 'Filter added', label || String(v));
+            }
+        },
+        removeTag(i) {
+            this._filter.tags.splice(i, 1);
+            this.renderFilterBar();
+            this.load();
+        },
+        clearTags() {
+            if (!this._filter.tags.length) { return; }
+            this._filter.tags = [];
+            this.renderFilterBar();
+            this.load();
+        },
+        toggleLogic() {
+            this._filter.logic = this._filter.logic === 'or' ? 'and' : 'or';
+            this.renderFilterBar();
+            this.load();
+        },
+        renderFilterBar() {
+            const $f = $('#trFilter');
+            if (!$f.length) { return; }
+            const tags = this._filter.tags;
+            const icons = { ip: '&#128225;', country: '&#127758;', isp: '&#127760;', app: '&#128230;', flag: '&#9873;' };
+            if (!tags.length) {
+                $f.removeClass('active').html('<span class="fhint">No filters — click a &#127991; icon on any IP, country, ISP, app or badge to filter.</span>');
+                return;
+            }
+            const logic = this._filter.logic.toUpperCase();
+            let html = '<span class="flabel">Filter</span>';
+            tags.forEach((t, i) => {
+                if (i > 0) {
+                    html += '<button class="flogic" data-logic title="Toggle AND / OR">' + logic + '</button>';
+                }
+                html += '<span class="fchip fchip-' + H.esc(t.t) + '"><span class="fico">' + (icons[t.t] || '') + '</span>' +
+                    '<span class="ftxt">' + H.esc(t.label || t.v) + '</span>' +
+                    '<button class="frm" data-rm="' + i + '" title="Remove">&times;</button></span>';
+            });
+            html += '<button class="fclear" data-clear title="Clear all filters">Clear</button>';
+            $f.addClass('active').html(html);
+        },
+
         // ---- Entity drill-downs --------------------------------------
         // Inline badges for an IP-ish row (blocked / data center / proxy / mobile).
         tags(x) {
             let t = '';
-            if (Number(x.blocked_bytes) > 0) { t += ' <span class="badge failed">blocked</span>'; }
-            if (x.is_datacenter || x.datacenter) { t += ' <span class="badge dc">DC</span>'; }
-            if (x.is_proxy || x.proxy) { t += ' <span class="badge proxy">proxy</span>'; }
-            if (x.is_mobile) { t += ' <span class="badge mobile">mobile</span>'; }
+            if (Number(x.blocked_bytes) > 0) { t += this.flagBadge('blocked', 'blocked', 'failed'); }
+            if (x.is_datacenter || x.datacenter) { t += this.flagBadge('datacenter', 'DC', 'dc'); }
+            if (x.is_proxy || x.proxy) { t += this.flagBadge('proxy', 'proxy', 'proxy'); }
+            if (x.is_mobile) { t += this.flagBadge('mobile', 'mobile', 'mobile'); }
             return t;
         },
         metaCell(k, vHtml) {
@@ -722,11 +824,41 @@
                 '</tbody></table></div></div>';
             return html;
         },
+        renderAppDetail(d) {
+            const a = d.activity || {}, m = d.meta || null;
+            const rows = d.sources || [];
+            let html = '<div class="drill-meta">' +
+                this.metaCell('Application', H.esc(d.app || 'server') + (m && m.status ? ' <span class="badge ' + H.esc(m.status) + '">' + H.esc(m.status) + '</span>' : '')) +
+                this.metaCell('Domain', H.esc((m && m.domain) || '—')) +
+                this.metaCell('Health', m && m.last_health ? '<span class="badge ' + H.esc(m.last_health) + '">' + H.esc(m.last_health) + '</span>' : '—') +
+                this.metaCell('Source IPs', (a.sources || 0).toLocaleString()) +
+                this.metaCell('Activity', (a.requests || 0).toLocaleString() + ' reqs · ' + H.bytes(a.bytes) + (a.errors ? ' · ' + a.errors + ' err' : '')) +
+                this.metaCell('Window', (d.window_hours || 24) + 'h' + (a.last_seen ? ' · last ' + H.ago(a.last_seen) : '')) +
+                '</div>';
+            html += '<div class="drill-section"><h4>Top source IPs <span class="sub">click an IP for services · ports · apps</span></h4>' +
+                '<div class="table-wrap"><table class="data"><thead><tr>' +
+                '<th>IP</th><th>Location</th><th>ISP</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
+                (rows.length ? rows.map((x, i) => (
+                    '<tr class="clickable" data-ipidx="' + i + '"><td class="mono">' + H.esc(x.src_ip) + this.tags(x) + (x.ever_blocked && !(Number(x.blocked_bytes) > 0) ? ' <span class="badge flag">flagged</span>' : '') + '</td>' +
+                    '<td>' + H.esc([x.city, x.country].filter(Boolean).join(', ') || '—') + '</td>' +
+                    '<td class="muted">' + H.esc(x.isp || '—') + '</td>' +
+                    '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
+                    '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
+                )).join('') : '<tr><td colspan="5" class="muted">no source IPs in window</td></tr>') +
+                '</tbody></table></div></div>';
+            html += this.miniTable('By country', d.countries, [['country', 'Country'], ['sources', 'IPs', 'num'], ['requests', 'Reqs', 'num'], ['bytes', 'Volume', 'bytes']], 'no country data');
+            html += this.miniTable('Top endpoints', d.endpoints, [['method', 'Method'], ['path', 'Path'], ['status', 'Status'], ['requests', 'Reqs', 'num'], ['bytes', 'Volume', 'bytes']], 'no endpoints recorded');
+            if (d.recent && d.recent.length) {
+                html += this.miniTable('Recent requests', d.recent, [['at', 'Time', 'ago'], ['src_ip', 'IP'], ['method', 'Method'], ['path', 'Path'], ['status_code', 'Status']]);
+            }
+            return html;
+        },
         // Navigable drill-down overlay with a back stack (country -> ISP -> IP).
         drill: {
             stack: [], _bk: null, _ips: [], _networks: [],
             openIp(ip) { this.push({ title: 'IP · ' + ip, kind: 'ip', arg: ip }); },
             openIsp(isp) { this.push({ title: 'ISP · ' + isp, kind: 'isp', arg: isp }); },
+            openApp(app) { this.push({ title: 'App · ' + (app || 'server'), kind: 'app', arg: app || 'server' }); },
             openCountry(code, name) { this.push({ title: 'Country · ' + (name || code || 'Unknown'), kind: 'country', arg: code, name: name }); },
             push(f) { this.stack.push(f); this.ensure(); this.render(); },
             back() { this.stack.pop(); if (!this.stack.length) { this.close(); return; } this.render(); },
@@ -743,6 +875,8 @@
                 this._bk = $bk;
                 $m.on('click', '#drillClose', () => self.close());
                 $m.on('click', '#drillBack', () => self.back());
+                // Tag-add handler is bound first so it wins over the row handlers below.
+                Views.traffic.bindTagClicks($m);
                 $m.on('click', 'tr[data-ipidx]', function () { const x = self._ips[Number($(this).data('ipidx'))]; if (x) { self.openIp(x.src_ip); } });
                 $m.on('click', 'tr[data-ispidx]', function () { const x = self._networks[Number($(this).data('ispidx'))]; if (x) { self.openIsp(x.isp); } });
             },
@@ -760,6 +894,10 @@
                 } else if (f.kind === 'isp') {
                     API.get('/traffic/isp?isp=' + encodeURIComponent(f.arg) + '&hours=' + hrs)
                         .then((r) => { this._ips = r.data.sources || []; $b.html(V.renderIspList(r.data)); })
+                        .catch(() => $b.html('<p class="muted">failed to load</p>'));
+                } else if (f.kind === 'app') {
+                    API.get('/traffic/app?app=' + encodeURIComponent(f.arg) + '&hours=' + hrs)
+                        .then((r) => { this._ips = r.data.sources || []; $b.html(V.renderAppDetail(r.data)); })
                         .catch(() => $b.html('<p class="muted">failed to load</p>'));
                 } else if (f.kind === 'country') {
                     API.get('/traffic/country?code=' + encodeURIComponent(f.arg || '') + '&hours=' + hrs)
@@ -829,46 +967,95 @@
         healthModal(rep) {
             if (!rep || !rep.app) { UI.toast('error', 'No health data'); return; }
             const a = rep.app, auto = rep.auto || {}, hist = rep.history || [];
+            const logs = rep.logs || {};
             const latest = hist[0] || null;
+            const d = (latest && latest.detail) || {};
             const overall = (latest && latest.status) || a.last_health || 'unknown';
+            const summary = d.summary || {};
+            const probes = summary.probes || Object.keys(d).filter((k) => ['http', 'helper', 'version', 'stats'].indexOf(k) >= 0);
+            const version = d.version || null;
 
-            // --- Auto / last-ran banner ---
-            const autoLine = auto.enabled
-                ? 'Runs automatically every <strong>' + H.esc(String(auto.interval_min)) + ' min</strong> <span class="muted">(monitor worker)</span>'
-                : '<strong>Manual only</strong> <span class="muted">(automatic checks disabled)</span>';
-            let html =
-                '<div class="drill-meta">' +
-                '<span class="badge ' + H.esc(overall) + '">' + H.esc(overall) + '</span>' +
-                '<span class="muted">Last checked: ' + (a.last_checked ? H.ago(a.last_checked) : 'never') + '</span>' +
-                '<span class="muted">' + autoLine + '</span>' +
+            // --- Metrics band: at-a-glance what the check covered ---
+            const metric = (k, v) => '<div class="m"><div class="k">' + k + '</div><div class="v">' + v + '</div></div>';
+            let html = '<div class="drill-meta">' +
+                metric('Overall', '<span class="badge ' + H.esc(overall) + '">' + H.esc(overall) + '</span>') +
+                metric('Last checked', a.last_checked ? H.ago(a.last_checked) : 'never') +
+                metric('Trigger', latest ? H.esc(latest.trigger_type) : '—') +
+                metric('Checks run', probes.length ? H.esc(probes.join(', ')) : '—') +
+                metric('Response', d.http && d.http.time_ms != null ? H.esc(String(d.http.time_ms)) + ' ms' : '—') +
+                metric('Version', version ? H.esc(String(version)) : '—') +
+                metric('Logs 24h', (logs.total_24h != null ? Number(logs.total_24h).toLocaleString() : '0') +
+                    (logs.errors_24h ? ' <span class="badge failed">' + logs.errors_24h + ' err</span>' : '')) +
                 '</div>';
 
-            // --- Latest check breakdown ---
-            const d = (latest && latest.detail) || {};
-            html += '<div class="drill-section"><h4>Latest check</h4>';
+            // --- Auto / last-ran note ---
+            html += '<p class="muted" style="margin-top:-4px">' + (auto.enabled
+                ? 'Checks run automatically every <strong>' + H.esc(String(auto.interval_min)) + ' min</strong> via the monitor worker.'
+                : '<strong>Manual checks only</strong> — automatic checks are disabled.') + '</p>';
+
+            if (!latest) {
+                html += '<p class="muted">No checks have run yet. Click “Check” to run one now.</p>';
+            }
+
+            // --- HTTP probe ---
             if (d.http) {
-                html += '<div class="kv-block"><div class="kv-head">HTTP probe ' +
-                    '<span class="badge ' + (d.http.ok ? 'healthy' : 'unhealthy') + '">' + (d.http.ok ? 'ok' : 'fail') + '</span></div>' +
+                html += '<div class="drill-section"><h4>HTTP probe ' +
+                    '<span class="badge ' + (d.http.ok ? 'healthy' : 'unhealthy') + '">' + (d.http.ok ? 'ok' : 'fail') + '</span></h4>' +
                     '<table class="data kv"><tbody>' +
                     '<tr><th>Endpoint</th><td class="mono">' + H.esc(a.health_url || '—') + '</td></tr>' +
                     '<tr><th>HTTP status</th><td class="mono">' + H.esc(String(d.http.status)) + '</td></tr>' +
                     '<tr><th>Response time</th><td class="mono">' + H.esc(String(d.http.time_ms)) + ' ms</td></tr>' +
-                    '</tbody></table></div>';
+                    (d.http.content_type ? '<tr><th>Content type</th><td class="mono">' + H.esc(d.http.content_type) + '</td></tr>' : '') +
+                    (d.http.size_bytes != null ? '<tr><th>Payload size</th><td class="mono">' + H.bytes(d.http.size_bytes) + '</td></tr>' : '') +
+                    (d.http.redirects ? '<tr><th>Redirects</th><td class="mono">' + H.esc(String(d.http.redirects)) + '</td></tr>' : '') +
+                    (d.http.error ? '<tr><th>Error</th><td class="mono">' + H.esc(String(d.http.error)) + '</td></tr>' : '') +
+                    '</tbody></table>' +
+                    (d.http.body_snippet ? '<div class="kv-head" style="margin-top:8px">Response body</div><pre class="payload">' + H.esc(d.http.body_snippet) + '</pre>' : '') +
+                    '</div>';
             }
+
+            // --- Helper health payload ---
             if (d.helper) {
-                html += '<div class="kv-block"><div class="kv-head">Helper reply ' +
-                    '<span class="badge info">' + H.esc(String(d.helper.status || 'ok')) + '</span></div>' +
+                html += '<div class="drill-section"><h4>Helper health ' +
+                    '<span class="badge info">' + H.esc(String(d.helper.status || 'ok')) + '</span></h4>' +
                     Views.apps._kvTable(d.helper) + '</div>';
             }
             if (d.helper_error) {
-                html += '<div class="kv-block"><div class="kv-head">Helper reply ' +
-                    '<span class="badge unhealthy">error</span></div>' +
+                html += '<div class="drill-section"><h4>Helper health ' +
+                    '<span class="badge unhealthy">error</span></h4>' +
                     '<p class="muted">' + H.esc(String(d.helper_error)) + '</p></div>';
             }
-            if (!d.http && !d.helper && !d.helper_error) {
-                html += '<p class="muted">No checks have run yet. Click “Check” to run one now.</p>';
+
+            // --- Application stats (elements the app reports on) ---
+            if (d.stats && Object.keys(d.stats).length) {
+                html += '<div class="drill-section"><h4>Application metrics <span class="sub">' +
+                    Object.keys(d.stats).length + ' element' + (Object.keys(d.stats).length === 1 ? '' : 's') + '</span></h4>' +
+                    Views.apps._kvTable(d.stats) + '</div>';
+            }
+
+            // --- Log activity ---
+            html += '<div class="drill-section"><h4>Log activity <span class="sub">24h</span></h4>';
+            const byLevel = logs.by_level || [];
+            if (logs.total_24h) {
+                html += '<table class="data kv"><tbody>' +
+                    '<tr><th>Total lines</th><td class="mono">' + Number(logs.total_24h).toLocaleString() + '</td></tr>' +
+                    '<tr><th>5xx errors</th><td class="mono">' + Number(logs.errors_24h || 0).toLocaleString() + '</td></tr>' +
+                    (logs.last_logged ? '<tr><th>Last log</th><td>' + H.ago(logs.last_logged) + '</td></tr>' : '') +
+                    '</tbody></table>' +
+                    (byLevel.length ? '<div class="kv-head" style="margin-top:8px">By level</div>' +
+                        '<table class="data"><thead><tr><th>Level</th><th>Count</th></tr></thead><tbody>' +
+                        byLevel.map((l) => '<tr><td>' + H.esc(l.level) + '</td><td class="mono">' + Number(l.count).toLocaleString() + '</td></tr>').join('') +
+                        '</tbody></table>' : '');
+            } else {
+                html += '<p class="muted">No app log lines in the last 24h. Wire the helper’s <code>logs</code> action to populate this.</p>';
             }
             html += '</div>';
+
+            // --- Advanced: full raw payload ---
+            if (latest && d && Object.keys(d).length) {
+                html += '<div class="drill-section"><details><summary class="adv-toggle">Advanced — raw payload</summary>' +
+                    '<pre class="payload">' + H.esc(JSON.stringify(d, null, 2)) + '</pre></details></div>';
+            }
 
             // --- History ---
             html += '<div class="drill-section"><h4>Recent checks</h4>';
@@ -890,7 +1077,9 @@
             UI.modal('Health — ' + (a.name || a.slug), html, (_d, close) => close(), 'Close');
         },
         _kvTable(obj) {
-            const rows = Object.keys(obj).map((k) => {
+            const keys = Object.keys(obj).filter((k) => k !== 'summary');
+            if (!keys.length) { return '<p class="muted">Empty payload.</p>'; }
+            const rows = keys.map((k) => {
                 let v = obj[k];
                 if (v === true) v = 'yes'; else if (v === false) v = 'no';
                 else if (v === null) v = '—';
