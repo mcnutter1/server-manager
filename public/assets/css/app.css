@@ -217,6 +217,33 @@ input.search { min-width: 220px; }
 .modal .field input, .modal .field select, .modal .field textarea { width: 100%; }
 .modal .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
 
+/* ---------------- Entity drill-down ---------------- */
+.drill-modal { width: min(880px, 94vw); max-height: 88vh; display: flex; flex-direction: column; padding: 0; }
+.drill-head { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border); }
+.drill-head h3 { margin: 0; flex: 1; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drill-head .btn.sm { padding: 5px 10px; font-size: 12px; }
+.drill-modal .modal-body { padding: 18px 20px; overflow-y: auto; }
+.btn.ghost.sm { background: transparent; }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: rgba(79, 140, 255, .08); }
+.drill-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 16px; }
+.drill-meta .m { background: var(--panel-2, rgba(255,255,255,.02)); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.drill-meta .m .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.drill-meta .m .v { font-size: 14px; font-weight: 600; margin-top: 3px; word-break: break-word; }
+.drill-section { margin-top: 18px; }
+.drill-section h4 { margin: 0 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.badge.dc { background: rgba(245, 166, 35, .16); color: var(--warn); }
+.badge.proxy { background: rgba(190, 120, 255, .18); color: #c99bff; }
+.badge.mobile { background: rgba(79, 140, 255, .16); color: var(--brand-2); }
+.badge.flag { background: rgba(255, 89, 100, .16); color: var(--crit); }
+.badge.clean { background: rgba(46, 204, 113, .16); color: var(--good); }
+
+/* health report modal key/value blocks */
+.kv-block { margin-bottom: 14px; }
+.kv-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+table.data.kv th { width: 42%; color: var(--muted); font-weight: 500; text-align: left; }
+table.data.kv td { word-break: break-word; }
+
 /* ---------------- Chart ---------------- */
 .chart-box { position: relative; height: 240px; }
 

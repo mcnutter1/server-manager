@@ -243,6 +243,9 @@ CREATE TABLE IF NOT EXISTS geo_cache (
     isp           VARCHAR(190)    NULL,
     org           VARCHAR(190)    NULL,
     asn           VARCHAR(80)     NULL,
+    hosting       TINYINT(1)      NULL,                     -- 1 = data center / hosting
+    proxy         TINYINT(1)      NULL,                     -- 1 = proxy / VPN / Tor exit
+    mobile        TINYINT(1)      NULL,                     -- 1 = mobile carrier network
     status        VARCHAR(20)     NOT NULL DEFAULT 'ok',   -- ok | private | fail
     updated_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (ip_address),
@@ -302,6 +305,28 @@ CREATE TABLE IF NOT EXISTS app_log_events (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------
+-- Application health check history. One row per health check (HTTP probe +
+-- helper reply) so the UI can show a health report and when it last ran.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS app_health_checks (
+    id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    app_id        BIGINT UNSIGNED NOT NULL,
+    app_slug      VARCHAR(120)    NULL,
+    status        VARCHAR(40)     NOT NULL DEFAULT 'unknown', -- healthy | degraded | unhealthy | unknown
+    trigger_type  VARCHAR(20)     NOT NULL DEFAULT 'manual',  -- manual | auto
+    http_ok       TINYINT(1)      NULL,
+    http_status   INT             NULL,
+    http_time_ms  INT             NULL,
+    helper_ok     TINYINT(1)      NULL,
+    helper_status VARCHAR(40)     NULL,
+    detail        JSON            NULL,
+    checked_at    DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_app (app_id),
+    KEY idx_checked (checked_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------
 -- Pairing unlock codes. Short-lived codes the manager issues so an operator
 -- can unlock a downstream app's helper page and reveal its enrollment key.
 -- ---------------------------------------------------------------------
@@ -322,5 +347,5 @@ CREATE TABLE IF NOT EXISTS pairing_codes (
 
 -- Seed a couple of defaults.
 INSERT INTO settings (skey, svalue) VALUES
-    ('schema_version', '"1.4.0"')
+    ('schema_version', '"1.6.0"')
 ON DUPLICATE KEY UPDATE svalue = VALUES(svalue);

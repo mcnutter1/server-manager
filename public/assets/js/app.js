@@ -304,9 +304,13 @@
                 '<div class="grid cols-2" style="margin-top:16px">' +
                 '  <div class="card"><h3>Top offenders <span class="sub">24h</span></h3><div id="offenders"></div></div>' +
                 '  <div class="card"><h3>Recent events</h3><div id="nidsEvents"></div></div>' +
-                '</div>'
+                '</div>' +
+                '<div class="section-head" style="margin-top:16px"><h2>Never block <span class="sub">allowlist · IPv4 · IPv6 · CIDR</span></h2>' +
+                (SM.admin ? '<div class="actions"><button class="btn" id="neverBlockBtn">＋ Add address</button></div>' : '') + '</div>' +
+                '<div class="card"><p class="muted" style="margin-top:0">These addresses and ranges are never auto-blocked or manually blocked, protecting your own control-plane, monitoring and office IPs.</p><div id="neverBlockTable"></div></div>'
             );
             $('#blockBtn').on('click', () => this.blockModal());
+            if (SM.admin) { $('#neverBlockBtn').on('click', () => this.neverBlockModal()); }
             this.load();
         },
         load() {
@@ -362,6 +366,52 @@
                         '<td>' + H.esc(e.category) + '</td><td><span class="badge ' + H.esc(e.severity) + '">' + H.esc(e.severity) + '</span></td></tr>'
                     )).join('') + '</tbody></table></div>');
             });
+            this.loadNeverBlock();
+        },
+        loadNeverBlock() {
+            UI.loading($('#neverBlockTable'));
+            API.get('/nids/never-block').then((r) => {
+                const entries = r.data.entries || [], cfg = r.data.config || [];
+                const cfgRows = cfg.map((ip) => (
+                    '<tr><td class="mono">' + H.esc(ip) + '</td><td class="muted">config baseline</td>' +
+                    '<td class="muted">—</td>' + (SM.admin ? '<td class="muted" style="text-align:right">read-only</td>' : '') + '</tr>'
+                )).join('');
+                const rows = entries.map((e) => (
+                    '<tr><td class="mono">' + H.esc(e.ip) + '</td>' +
+                    '<td>' + (e.note ? H.esc(e.note) : '<span class="muted">—</span>') + '</td>' +
+                    '<td class="muted">' + H.esc(e.added_by || '') + (e.added_at ? ' · ' + H.ago(e.added_at) : '') + '</td>' +
+                    (SM.admin ? '<td style="text-align:right"><button class="btn small ghost" data-nbremove="' + H.esc(e.ip) + '">Remove</button></td>' : '') + '</tr>'
+                )).join('');
+                $('#neverBlockTable').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Address / range</th><th>Note</th><th>Added</th>' + (SM.admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
+                    cfgRows + rows +
+                    (!cfg.length && !entries.length ? '<tr><td colspan="4" class="muted">No allowlist entries.</td></tr>' : '') +
+                    '</tbody></table></div>');
+                $('#neverBlockTable [data-nbremove]').on('click', function () {
+                    const ip = $(this).data('nbremove');
+                    UI.confirm('Remove ' + ip + ' from the never-block list?', () => API.post('/nids/never-block/remove', { ip: String(ip) }).then((res) => {
+                        if (res.data.ok) { UI.toast('success', 'Removed', String(ip)); Views.nids.loadNeverBlock(); }
+                        else UI.toast('error', 'Remove failed', res.data.error);
+                    }));
+                });
+            });
+        },
+        neverBlockModal() {
+            UI.modal('Add to never-block list',
+                '<div class="field"><label>IP address or CIDR range</label><input name="ip" placeholder="203.0.113.10  ·  2001:db8::/32"></div>' +
+                '<div class="field"><label>Note <span class="muted">(optional)</span></label><input name="note" placeholder="Office uplink"></div>' +
+                '<p class="muted">IPv4, IPv6 and CIDR ranges are supported. Any active block covered by this entry is lifted immediately.</p>',
+                (d, close) => {
+                    if (!d.ip) { UI.toast('warn', 'Address required'); return; }
+                    API.post('/nids/never-block', { ip: d.ip, note: d.note })
+                        .then((res) => {
+                            if (res.data.ok) {
+                                const un = (res.data.unblocked || []).length;
+                                UI.toast('success', 'Added to never-block', d.ip + (un ? ' · unblocked ' + un : ''));
+                                close(); Views.nids.load();
+                            } else UI.toast('error', 'Add failed', res.data.error);
+                        });
+                }, 'Add');
         },
         blockModal() {
             UI.modal('Block a host',
@@ -402,11 +452,11 @@
                 '<div class="card" style="margin-top:16px;padding:0;overflow:hidden">' +
                 '  <div id="trMap" style="height:440px;width:100%;background:#0d1526"></div></div>' +
                 '<div class="grid cols-2" style="margin-top:16px">' +
-                '  <div class="card"><h3>Top sources <span class="sub">by volume · ISP · country · URL</span></h3><div id="trSources"></div></div>' +
-                '  <div class="card"><h3>By country</h3><div id="trCountries"></div></div>' +
+                '  <div class="card"><h3>Top sources <span class="sub">click a row → services · ports · apps</span></h3><div id="trSources"></div></div>' +
+                '  <div class="card"><h3>By country <span class="sub">click → ISPs → IPs</span></h3><div id="trCountries"></div></div>' +
                 '</div>' +
                 '<div class="grid cols-2" style="margin-top:16px">' +
-                '  <div class="card"><h3>By ISP / network</h3><div id="trIsps"></div></div>' +
+                '  <div class="card"><h3>By ISP / network <span class="sub">click → IPs → detail</span></h3><div id="trIsps"></div></div>' +
                 '  <div class="card"><h3>By application</h3><div id="trApps"></div></div>' +
                 '</div>'
             );
@@ -430,6 +480,16 @@
             });
             this.initMap();
             this.load();
+            // Delegated drill-down: click any IP / country / ISP row to open its detail.
+            $el.on('click', 'tr[data-drill]', (e) => {
+                const $tr = $(e.currentTarget);
+                const kind = $tr.data('drill');
+                const x = (kind === 'ip' ? this._sources : kind === 'country' ? this._countries : this._isps)[Number($tr.data('idx'))];
+                if (!x) { return; }
+                if (kind === 'ip') { this.drill.openIp(x.src_ip); }
+                else if (kind === 'country') { this.drill.openCountry(x.country_code, x.country); }
+                else if (kind === 'isp') { this.drill.openIsp(x.isp); }
+            });
         },
         initMap() {
             if (typeof L === 'undefined') { return; }
@@ -456,10 +516,11 @@
             });
             this.loadMap(hours);
             API.get('/traffic/sources?hours=' + hours + '&limit=25').then((r) => {
+                this._sources = r.data || [];
                 $('#trSources').html('<div class="table-wrap"><table class="data"><thead><tr>' +
-                    '<th>IP</th><th>Country</th><th>ISP</th><th>Top URL</th><th>Reqs</th><th>Volume</th></tr></thead><tbody>' +
-                    (r.data.length ? r.data.map((x) => (
-                        '<tr><td class="mono">' + H.esc(x.src_ip) + (Number(x.blocked_bytes) > 0 ? ' <span class="badge failed">blocked</span>' : '') + '</td>' +
+                    '<th>IP</th><th>Country</th><th>ISP</th><th>Top URL</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
+                    (this._sources.length ? this._sources.map((x, i) => (
+                        '<tr class="clickable" data-drill="ip" data-idx="' + i + '"><td class="mono">' + H.esc(x.src_ip) + this.tags(x) + '</td>' +
                         '<td>' + H.esc(x.city ? x.city + ', ' : '') + H.esc(x.country || '—') + '</td>' +
                         '<td class="muted">' + H.esc(x.isp || '—') + '</td>' +
                         '<td class="mono" title="' + H.esc(x.apps || '') + '">' + H.esc((x.top_path || x.apps || '—')) + '</td>' +
@@ -469,14 +530,28 @@
                     '</tbody></table></div>');
             });
             API.get('/traffic/countries?hours=' + hours).then((r) => {
-                $('#trCountries').html(this.simpleTable(r.data, [
-                    ['country', 'Country'], ['sources', 'Sources', true], ['requests', 'Reqs', true], ['bytes', 'Volume', 'bytes']
-                ]));
+                this._countries = r.data || [];
+                $('#trCountries').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Country</th><th class="num">Sources</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
+                    (this._countries.length ? this._countries.map((x, i) => (
+                        '<tr class="clickable" data-drill="country" data-idx="' + i + '"><td>' + H.esc(x.country || 'Unknown') + '</td>' +
+                        '<td class="mono">' + (Number(x.sources) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
+                    )).join('') : '<tr><td colspan="4" class="muted">no data</td></tr>') +
+                    '</tbody></table></div>');
             });
             API.get('/traffic/isps?hours=' + hours).then((r) => {
-                $('#trIsps').html(this.simpleTable(r.data, [
-                    ['isp', 'ISP / network'], ['sources', 'Sources', true], ['requests', 'Reqs', true], ['bytes', 'Volume', 'bytes']
-                ]));
+                this._isps = r.data || [];
+                $('#trIsps').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>ISP / network</th><th class="num">Sources</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
+                    (this._isps.length ? this._isps.map((x, i) => (
+                        '<tr class="clickable" data-drill="isp" data-idx="' + i + '"><td>' + H.esc(x.isp || 'Unknown') + '</td>' +
+                        '<td class="mono">' + (Number(x.sources) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
+                    )).join('') : '<tr><td colspan="4" class="muted">no data</td></tr>') +
+                    '</tbody></table></div>');
             });
             API.get('/traffic/apps?hours=' + hours).then((r) => {
                 $('#trApps').html(this.simpleTable(r.data, [
@@ -511,9 +586,12 @@
                         H.esc((s.city ? s.city + ', ' : '') + (s.country || '')) + '<br>' +
                         H.esc(s.isp || '') + '<br>' +
                         (Number(s.requests) || 0).toLocaleString() + ' reqs · ' + H.bytes(s.bytes) +
+                        (s.datacenter ? '<br><span style="color:#f5a623">data center</span>' : '') +
+                        (s.proxy ? '<br><span style="color:#c99bff">proxy / VPN</span>' : '') +
                         (blocked ? '<br><span style="color:#ff5470">blocked traffic</span>' : '') +
-                        (s.apps && s.apps.length ? '<br>apps: ' + H.esc(s.apps.join(', ')) : '')
-                    );
+                        (s.apps && s.apps.length ? '<br>apps: ' + H.esc(s.apps.join(', ')) : '') +
+                        '<br><i style="opacity:.7">click for full detail</i>'
+                    ).on('click', () => this.drill.openIp(s.ip));
                 });
             });
         },
@@ -543,6 +621,152 @@
                 return '<td' + (c[2] ? ' class="mono"' : '') + '>' + v + '</td>';
             }).join('') + '</tr>').join('') : '<tr><td colspan="' + cols.length + '" class="muted">no data</td></tr>';
             return '<div class="table-wrap"><table class="data"><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+        },
+
+        // ---- Entity drill-downs --------------------------------------
+        // Inline badges for an IP-ish row (blocked / data center / proxy / mobile).
+        tags(x) {
+            let t = '';
+            if (Number(x.blocked_bytes) > 0) { t += ' <span class="badge failed">blocked</span>'; }
+            if (x.is_datacenter || x.datacenter) { t += ' <span class="badge dc">DC</span>'; }
+            if (x.is_proxy || x.proxy) { t += ' <span class="badge proxy">proxy</span>'; }
+            if (x.is_mobile) { t += ' <span class="badge mobile">mobile</span>'; }
+            return t;
+        },
+        metaCell(k, vHtml) {
+            return '<div class="m"><div class="k">' + H.esc(k) + '</div><div class="v">' + vHtml + '</div></div>';
+        },
+        // Read-only table for a drill panel. cols: [key, label, fmt] where fmt is
+        // 'num' | 'bytes' | 'ago' | undefined (plain, escaped).
+        miniTable(title, rows, cols, empty) {
+            const isNum = (c) => c[2] && c[2] !== 'ago';
+            const head = cols.map((c) => '<th' + (isNum(c) ? ' class="num"' : '') + '>' + H.esc(c[1]) + '</th>').join('');
+            const body = rows && rows.length ? rows.map((row) => '<tr>' + cols.map((c) => {
+                let v = row[c[0]];
+                if (c[2] === 'bytes') { v = H.bytes(v); }
+                else if (c[2] === 'num') { v = (Number(v) || 0).toLocaleString(); }
+                else if (c[2] === 'ago') { v = H.ago(v); }
+                else { v = H.esc(v == null || v === '' ? '—' : v); }
+                return '<td' + (isNum(c) ? ' class="mono"' : '') + '>' + v + '</td>';
+            }).join('') + '</tr>').join('') : '<tr><td colspan="' + cols.length + '" class="muted">' + H.esc(empty || 'none') + '</td></tr>';
+            return '<div class="drill-section"><h4>' + H.esc(title) + '</h4><div class="table-wrap"><table class="data"><thead><tr>' +
+                head + '</tr></thead><tbody>' + body + '</tbody></table></div></div>';
+        },
+        renderIpDetail(d) {
+            const g = d.geo || {}, rep = d.reputation || {}, a = d.activity || {};
+            const loc = [g.city, g.region, g.country].filter(Boolean).map(H.esc).join(', ') || '—';
+            const net = [];
+            if (g.is_datacenter) { net.push('data center'); }
+            if (g.is_proxy) { net.push('proxy / VPN'); }
+            if (g.is_mobile) { net.push('mobile carrier'); }
+            const repBadge = rep.flagged
+                ? '<span class="badge flag">' + (rep.blocked_now ? 'blocked now' : (rep.ever_blocked ? 'previously blocked' : 'threat activity')) + '</span>'
+                : '<span class="badge clean">no prior flags</span>';
+            let html = '<div class="drill-meta">' +
+                this.metaCell('Location', loc) +
+                this.metaCell('ISP / network', H.esc(g.isp || '—') + (g.org && g.org !== g.isp ? '<div class="muted" style="font-size:12px">' + H.esc(g.org) + '</div>' : '')) +
+                this.metaCell('ASN', H.esc(g.asn || '—')) +
+                this.metaCell('Network type', net.length ? net.map(H.esc).join(', ') : 'residential / other') +
+                this.metaCell('Reputation', repBadge) +
+                this.metaCell('Activity', (a.requests || 0).toLocaleString() + ' reqs · ' + H.bytes(a.bytes) + (a.errors ? ' · ' + a.errors + ' err' : '') + (a.blocked_bytes ? ' · ' + H.bytes(a.blocked_bytes) + ' blocked' : '')) +
+                '</div>';
+            if (rep.flagged) {
+                const bits = [];
+                if (rep.block_count) { bits.push(rep.block_count + ' firewall block' + (rep.block_count > 1 ? 's' : '') + (rep.last_reason ? ' (' + H.esc(rep.last_reason) + ')' : '') + (rep.last_blocked_at ? ', last ' + H.ago(rep.last_blocked_at) : '')); }
+                if (rep.threat_events) { bits.push(rep.threat_events + ' NIDS event' + (rep.threat_events > 1 ? 's' : '') + (rep.threat_severity ? ' [' + H.esc(rep.threat_severity) + ']' : '') + (rep.threat_categories ? ': ' + H.esc(rep.threat_categories) : '')); }
+                if (bits.length) { html += '<div class="drill-section"><h4>Reputation</h4><p class="muted" style="margin:0">' + bits.join(' · ') + '</p></div>'; }
+            }
+            html += this.miniTable('Applications / services', d.services, [['service', 'Service'], ['requests', 'Reqs', 'num'], ['bytes', 'Volume', 'bytes'], ['errors', 'Errors', 'num']], 'no application traffic');
+            html += this.miniTable('Ports probed (NIDS)', d.ports, [['port', 'Port'], ['category', 'Category'], ['severity', 'Severity'], ['hits', 'Hits', 'num']], 'no port-level activity recorded');
+            html += this.miniTable('Top endpoints', d.endpoints, [['method', 'Method'], ['path', 'Path'], ['status', 'Status'], ['requests', 'Reqs', 'num'], ['bytes', 'Volume', 'bytes']], 'no endpoints recorded');
+            if (d.recent && d.recent.length) {
+                html += this.miniTable('Recent requests', d.recent, [['at', 'Time', 'ago'], ['method', 'Method'], ['path', 'Path'], ['status_code', 'Status'], ['bytes', 'Bytes', 'bytes']]);
+            }
+            return html;
+        },
+        renderIspList(d) {
+            const rows = d.sources || [];
+            let html = '<div class="drill-meta">' +
+                this.metaCell('ISP / network', H.esc(d.isp || 'Unknown')) +
+                this.metaCell('Source IPs', rows.length.toLocaleString()) +
+                '</div>';
+            html += '<div class="drill-section"><h4>Source IPs <span class="sub">click an IP for services · ports · apps</span></h4>' +
+                '<div class="table-wrap"><table class="data"><thead><tr>' +
+                '<th>IP</th><th>Location</th><th>Services</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
+                (rows.length ? rows.map((x, i) => (
+                    '<tr class="clickable" data-ipidx="' + i + '"><td class="mono">' + H.esc(x.src_ip) + this.tags(x) + (x.ever_blocked && !(Number(x.blocked_bytes) > 0) ? ' <span class="badge flag">flagged</span>' : '') + '</td>' +
+                    '<td>' + H.esc([x.city, x.country].filter(Boolean).join(', ') || '—') + '</td>' +
+                    '<td class="muted" title="' + H.esc(x.services || '') + '">' + H.esc(x.services || '—') + '</td>' +
+                    '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
+                    '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
+                )).join('') : '<tr><td colspan="5" class="muted">no IPs in window</td></tr>') +
+                '</tbody></table></div></div>';
+            return html;
+        },
+        renderCountryList(d, name) {
+            const rows = d.isps || [];
+            let html = '<div class="drill-meta">' +
+                this.metaCell('Country', H.esc(name || d.country_code || 'Unknown')) +
+                this.metaCell('ISPs / networks', rows.length.toLocaleString()) +
+                '</div>';
+            html += '<div class="drill-section"><h4>ISPs / networks <span class="sub">click a network for its IPs</span></h4>' +
+                '<div class="table-wrap"><table class="data"><thead><tr>' +
+                '<th>ISP / network</th><th>ASN</th><th class="num">IPs</th><th class="num">Reqs</th><th class="num">Volume</th></tr></thead><tbody>' +
+                (rows.length ? rows.map((x, i) => (
+                    '<tr class="clickable" data-ispidx="' + i + '"><td>' + H.esc(x.isp || 'Unknown') + (x.is_datacenter ? ' <span class="badge dc">DC</span>' : '') + '</td>' +
+                    '<td class="muted mono">' + H.esc(x.asn || '—') + '</td>' +
+                    '<td class="mono">' + (Number(x.sources) || 0).toLocaleString() + '</td>' +
+                    '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
+                    '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
+                )).join('') : '<tr><td colspan="5" class="muted">no ISPs in window</td></tr>') +
+                '</tbody></table></div></div>';
+            return html;
+        },
+        // Navigable drill-down overlay with a back stack (country -> ISP -> IP).
+        drill: {
+            stack: [], _bk: null, _ips: [], _networks: [],
+            openIp(ip) { this.push({ title: 'IP · ' + ip, kind: 'ip', arg: ip }); },
+            openIsp(isp) { this.push({ title: 'ISP · ' + isp, kind: 'isp', arg: isp }); },
+            openCountry(code, name) { this.push({ title: 'Country · ' + (name || code || 'Unknown'), kind: 'country', arg: code, name: name }); },
+            push(f) { this.stack.push(f); this.ensure(); this.render(); },
+            back() { this.stack.pop(); if (!this.stack.length) { this.close(); return; } this.render(); },
+            close() { this.stack = []; if (this._bk) { this._bk.remove(); this._bk = null; } },
+            ensure() {
+                if (this._bk) { return; }
+                const self = this;
+                const $bk = $('<div class="modal-backdrop"></div>');
+                const $m = $('<div class="modal drill-modal"></div>')
+                    .append('<div class="drill-head"><button class="btn ghost sm" id="drillBack">← Back</button><h3 id="drillTitle"></h3><button class="btn ghost sm" id="drillClose">✕</button></div>')
+                    .append('<div class="modal-body" id="drillBody"></div>');
+                $bk.append($m).on('click', (e) => { if (e.target === $bk[0]) { self.close(); } });
+                $('body').append($bk);
+                this._bk = $bk;
+                $m.on('click', '#drillClose', () => self.close());
+                $m.on('click', '#drillBack', () => self.back());
+                $m.on('click', 'tr[data-ipidx]', function () { const x = self._ips[Number($(this).data('ipidx'))]; if (x) { self.openIp(x.src_ip); } });
+                $m.on('click', 'tr[data-ispidx]', function () { const x = self._networks[Number($(this).data('ispidx'))]; if (x) { self.openIsp(x.isp); } });
+            },
+            render() {
+                const V = Views.traffic, f = this.stack[this.stack.length - 1];
+                if (!f) { return; }
+                $('#drillTitle').text(f.title);
+                $('#drillBack').css('visibility', this.stack.length > 1 ? 'visible' : 'hidden');
+                const $b = $('#drillBody'); UI.loading($b);
+                const hrs = V._hours;
+                if (f.kind === 'ip') {
+                    API.get('/traffic/ip?ip=' + encodeURIComponent(f.arg) + '&hours=' + hrs)
+                        .then((r) => { $b.html(V.renderIpDetail(r.data)); })
+                        .catch(() => $b.html('<p class="muted">failed to load</p>'));
+                } else if (f.kind === 'isp') {
+                    API.get('/traffic/isp?isp=' + encodeURIComponent(f.arg) + '&hours=' + hrs)
+                        .then((r) => { this._ips = r.data.sources || []; $b.html(V.renderIspList(r.data)); })
+                        .catch(() => $b.html('<p class="muted">failed to load</p>'));
+                } else if (f.kind === 'country') {
+                    API.get('/traffic/country?code=' + encodeURIComponent(f.arg || '') + '&hours=' + hrs)
+                        .then((r) => { this._networks = r.data.isps || []; $b.html(V.renderCountryList(r.data, f.name)); })
+                        .catch(() => $b.html('<p class="muted">failed to load</p>'));
+                }
+            }
         }
     };
 
@@ -566,23 +790,31 @@
             UI.loading($('#appsTable'));
             API.get('/apps').then((r) => {
                 $('#appsTable').html('<div class="table-wrap"><table class="data"><thead><tr>' +
-                    '<th>App</th><th>Path</th><th>Domain</th><th>Status</th><th>Health</th><th style="text-align:right">Actions</th></tr></thead><tbody>' +
+                    '<th>App</th><th>Path</th><th>Domain</th><th>Status</th><th>Health</th><th>Checked</th><th style="text-align:right">Actions</th></tr></thead><tbody>' +
                     (r.data.length ? r.data.map((a) => (
                         '<tr><td><strong>' + H.esc(a.name) + '</strong><br><span class="muted mono">' + H.esc(a.slug) + '</span></td>' +
                         '<td class="mono">' + H.esc(a.path) + '</td>' +
                         '<td>' + (a.domain ? H.esc(a.domain) : '<span class="muted">—</span>') + '</td>' +
                         '<td><span class="badge ' + H.esc(a.status) + '">' + H.esc(a.status) + '</span></td>' +
                         '<td>' + (a.last_health ? '<span class="badge ' + H.esc(a.last_health) + '">' + H.esc(a.last_health) + '</span>' : '<span class="muted">unknown</span>') + '</td>' +
-                        '<td style="text-align:right"><button class="btn small ghost" data-health="' + a.id + '">Check</button>' +
+                        '<td class="muted">' + (a.last_checked ? H.ago(a.last_checked) : 'never') + '</td>' +
+                        '<td style="text-align:right"><button class="btn small ghost" data-report="' + a.id + '">Report</button>' +
+                        ' <button class="btn small ghost" data-health="' + a.id + '">Check</button>' +
                         (SM.admin ? ' <button class="btn small" data-edit="' + a.id + '">Edit</button>' : '') +
                         (SM.admin ? ' <button class="btn small danger" data-remove="' + a.id + '">Remove</button>' : '') + '</td></tr>'
-                    )).join('') : '<tr><td colspan="6" class="muted">No apps registered. Use Discover to find apps under /var/www.</td></tr>') +
+                    )).join('') : '<tr><td colspan="7" class="muted">No apps registered. Use Discover to find apps under /var/www.</td></tr>') +
                     '</tbody></table></div>');
                 $('#appsTable [data-health]').on('click', function () {
                     const id = $(this).data('health');
+                    const $btn = $(this).prop('disabled', true).text('Checking…');
                     API.post('/apps/' + id + '/health').then((res) => {
-                        UI.toast('success', 'Health', 'Status: ' + (res.data.status || 'unknown')); Views.apps.load();
-                    });
+                        Views.apps.healthModal(res.data);
+                        Views.apps.load();
+                    }).catch(() => { UI.toast('error', 'Health check failed'); $btn.prop('disabled', false).text('Check'); });
+                });
+                $('#appsTable [data-report]').on('click', function () {
+                    const id = $(this).data('report');
+                    API.get('/apps/' + id + '/health').then((res) => Views.apps.healthModal(res.data));
                 });
                 $('#appsTable [data-edit]').on('click', function () {
                     const id = $(this).data('edit');
@@ -593,6 +825,79 @@
                     UI.confirm('Remove this app from the registry?', () => API.del('/apps/' + id).then(() => { UI.toast('success', 'Removed'); Views.apps.load(); }));
                 });
             });
+        },
+        healthModal(rep) {
+            if (!rep || !rep.app) { UI.toast('error', 'No health data'); return; }
+            const a = rep.app, auto = rep.auto || {}, hist = rep.history || [];
+            const latest = hist[0] || null;
+            const overall = (latest && latest.status) || a.last_health || 'unknown';
+
+            // --- Auto / last-ran banner ---
+            const autoLine = auto.enabled
+                ? 'Runs automatically every <strong>' + H.esc(String(auto.interval_min)) + ' min</strong> <span class="muted">(monitor worker)</span>'
+                : '<strong>Manual only</strong> <span class="muted">(automatic checks disabled)</span>';
+            let html =
+                '<div class="drill-meta">' +
+                '<span class="badge ' + H.esc(overall) + '">' + H.esc(overall) + '</span>' +
+                '<span class="muted">Last checked: ' + (a.last_checked ? H.ago(a.last_checked) : 'never') + '</span>' +
+                '<span class="muted">' + autoLine + '</span>' +
+                '</div>';
+
+            // --- Latest check breakdown ---
+            const d = (latest && latest.detail) || {};
+            html += '<div class="drill-section"><h4>Latest check</h4>';
+            if (d.http) {
+                html += '<div class="kv-block"><div class="kv-head">HTTP probe ' +
+                    '<span class="badge ' + (d.http.ok ? 'healthy' : 'unhealthy') + '">' + (d.http.ok ? 'ok' : 'fail') + '</span></div>' +
+                    '<table class="data kv"><tbody>' +
+                    '<tr><th>Endpoint</th><td class="mono">' + H.esc(a.health_url || '—') + '</td></tr>' +
+                    '<tr><th>HTTP status</th><td class="mono">' + H.esc(String(d.http.status)) + '</td></tr>' +
+                    '<tr><th>Response time</th><td class="mono">' + H.esc(String(d.http.time_ms)) + ' ms</td></tr>' +
+                    '</tbody></table></div>';
+            }
+            if (d.helper) {
+                html += '<div class="kv-block"><div class="kv-head">Helper reply ' +
+                    '<span class="badge info">' + H.esc(String(d.helper.status || 'ok')) + '</span></div>' +
+                    Views.apps._kvTable(d.helper) + '</div>';
+            }
+            if (d.helper_error) {
+                html += '<div class="kv-block"><div class="kv-head">Helper reply ' +
+                    '<span class="badge unhealthy">error</span></div>' +
+                    '<p class="muted">' + H.esc(String(d.helper_error)) + '</p></div>';
+            }
+            if (!d.http && !d.helper && !d.helper_error) {
+                html += '<p class="muted">No checks have run yet. Click “Check” to run one now.</p>';
+            }
+            html += '</div>';
+
+            // --- History ---
+            html += '<div class="drill-section"><h4>Recent checks</h4>';
+            if (hist.length) {
+                html += '<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Time</th><th>Trigger</th><th>Status</th><th>HTTP</th><th>Response</th></tr></thead><tbody>' +
+                    hist.map((h) => (
+                        '<tr><td class="muted">' + H.ago(h.checked_at) + '</td>' +
+                        '<td><span class="badge ' + (h.trigger_type === 'auto' ? 'info' : 'clean') + '">' + H.esc(h.trigger_type) + '</span></td>' +
+                        '<td><span class="badge ' + H.esc(h.status) + '">' + H.esc(h.status) + '</span></td>' +
+                        '<td class="mono">' + (h.http_status != null ? H.esc(String(h.http_status)) : '—') + '</td>' +
+                        '<td class="mono">' + (h.http_time_ms != null ? H.esc(String(h.http_time_ms)) + ' ms' : '—') + '</td></tr>'
+                    )).join('') + '</tbody></table></div>';
+            } else {
+                html += '<p class="muted">No history yet.</p>';
+            }
+            html += '</div>';
+
+            UI.modal('Health — ' + (a.name || a.slug), html, (_d, close) => close(), 'Close');
+        },
+        _kvTable(obj) {
+            const rows = Object.keys(obj).map((k) => {
+                let v = obj[k];
+                if (v === true) v = 'yes'; else if (v === false) v = 'no';
+                else if (v === null) v = '—';
+                else if (typeof v === 'object') v = JSON.stringify(v);
+                return '<tr><th>' + H.esc(k) + '</th><td class="mono">' + H.esc(String(v)) + '</td></tr>';
+            }).join('');
+            return '<table class="data kv"><tbody>' + rows + '</tbody></table>';
         },
         discover() {
             UI.loading($('#discoverResults'));

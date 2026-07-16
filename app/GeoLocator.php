@@ -22,7 +22,7 @@ namespace App;
 final class GeoLocator
 {
     /** Fields we ask ip-api for (bit-packed numeric mask keeps the URL short). */
-    private const IPAPI_FIELDS = 'status,message,country,countryCode,region,regionName,city,lat,lon,isp,org,as,query';
+    private const IPAPI_FIELDS = 'status,message,country,countryCode,region,regionName,city,lat,lon,isp,org,as,mobile,proxy,hosting,query';
 
     /**
      * Resolve many IPs at once. Returns a map keyed by IP address.
@@ -106,15 +106,17 @@ final class GeoLocator
         $row = self::normalize($data + ['ip_address' => $ip]);
         Database::instance()->exec(
             'INSERT INTO geo_cache
-                (ip_address, country, country_code, region, city, lat, lng, isp, org, asn, status, updated_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?, NOW())
+                (ip_address, country, country_code, region, city, lat, lng, isp, org, asn, hosting, proxy, mobile, status, updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, NOW())
              ON DUPLICATE KEY UPDATE
                 country=VALUES(country), country_code=VALUES(country_code), region=VALUES(region),
                 city=VALUES(city), lat=VALUES(lat), lng=VALUES(lng), isp=VALUES(isp),
-                org=VALUES(org), asn=VALUES(asn), status=VALUES(status), updated_at=NOW()',
+                org=VALUES(org), asn=VALUES(asn), hosting=VALUES(hosting), proxy=VALUES(proxy),
+                mobile=VALUES(mobile), status=VALUES(status), updated_at=NOW()',
             [
                 $ip, $row['country'], $row['country_code'], $row['region'], $row['city'],
-                $row['lat'], $row['lng'], $row['isp'], $row['org'], $row['asn'], $row['status'],
+                $row['lat'], $row['lng'], $row['isp'], $row['org'], $row['asn'],
+                $row['hosting'], $row['proxy'], $row['mobile'], $row['status'],
             ]
         );
         return $row;
@@ -174,6 +176,9 @@ final class GeoLocator
                 'isp'          => $ok ? ($entry['isp'] ?? null) : null,
                 'org'          => $ok ? ($entry['org'] ?? null) : null,
                 'asn'          => $ok ? ($entry['as'] ?? null) : null,
+                'hosting'      => $ok && isset($entry['hosting']) ? (int) (bool) $entry['hosting'] : null,
+                'proxy'        => $ok && isset($entry['proxy']) ? (int) (bool) $entry['proxy'] : null,
+                'mobile'       => $ok && isset($entry['mobile']) ? (int) (bool) $entry['mobile'] : null,
                 'status'       => $ok ? 'ok' : 'fail',
             ];
         }
@@ -197,6 +202,9 @@ final class GeoLocator
             'isp'          => $r['isp'] ?? null,
             'org'          => $r['org'] ?? null,
             'asn'          => $r['asn'] ?? null,
+            'hosting'      => isset($r['hosting']) && $r['hosting'] !== null ? (int) (bool) $r['hosting'] : null,
+            'proxy'        => isset($r['proxy']) && $r['proxy'] !== null ? (int) (bool) $r['proxy'] : null,
+            'mobile'       => isset($r['mobile']) && $r['mobile'] !== null ? (int) (bool) $r['mobile'] : null,
             'status'       => (string) ($r['status'] ?? 'ok'),
         ];
     }

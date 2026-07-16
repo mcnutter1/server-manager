@@ -17,6 +17,11 @@ return [
         'timezone'    => 'America/New_York',
         // Absolute path on disk that holds the individually managed apps.
         'apps_root'   => '/var/www',
+        // Automatic application health checks. The monitor worker
+        // (bin/collect-metrics.php) re-checks each managed app whose last
+        // check is older than this many minutes. 0 disables automatic
+        // checks (manual "Check" button only).
+        'health_interval_min' => 5,
     ],
 
     // ---------------------------------------------------------------
@@ -104,6 +109,9 @@ return [
         'auto_block_threshold'  => 8,
         'auto_block_window_min' => 10,
         // Never block these (control plane, monitoring, your office IPs).
+        // Baseline allowlist from config; additional "Never block" entries
+        // (IPv4/IPv6 addresses or CIDR ranges) can be managed live from the
+        // Security view and are stored in the settings table.
         'whitelist' => ['127.0.0.1', '::1'],
         // iptables chain used exclusively by this system.
         'chain'     => 'SRVMGR_BLOCK',

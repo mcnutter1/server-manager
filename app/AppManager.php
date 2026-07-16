@@ -398,7 +398,7 @@ final class AppManager
     // Health checks
     // -----------------------------------------------------------------
     /** Check one app: HTTP health_url and/or its helper endpoint. */
-    public static function checkHealth(int $id): array
+    public static function checkHealth(int $id, string $trigger = 'manual'): array
     {
         $app = self::find($id);
         if (!$app) {
@@ -407,6 +407,8 @@ final class AppManager
 
         $result = ['app_id' => $id, 'slug' => $app['slug'], 'checks' => []];
         $overall = 'unknown';
+        $http = null;
+        $helper = null;
 
         if (!empty($app['health_url'])) {
             $http = self::httpProbe($app['health_url']);
@@ -414,20 +416,121 @@ final class AppManager
             $overall = $http['ok'] ? 'healthy' : 'unhealthy';
         }
 
-        $helper = self::callHelper($app, 'health');
-        if ($helper['ok']) {
-            $result['checks']['helper'] = $helper['data'];
-            $status = $helper['data']['status'] ?? 'healthy';
+        $helperCall = self::callHelper($app, 'health');
+        if ($helperCall['ok']) {
+            $helper = $helperCall['data'];
+            $result['checks']['helper'] = $helper;
+            $status = $helper['status'] ?? 'healthy';
             $overall = $status === 'ok' || $status === 'healthy' ? 'healthy' : 'degraded';
+        } elseif (empty($app['health_url'])) {
+            // No HTTP probe and the helper failed → surface the failure.
+            $result['checks']['helper_error'] = $helperCall['error'] ?? 'helper unreachable';
+            $overall = 'unhealthy';
         }
 
-        Database::instance()->exec(
+        $db = Database::instance();
+        $db->exec(
             'UPDATE managed_apps SET last_health = ?, last_checked = NOW() WHERE id = ?',
             [$overall, $id]
         );
 
+        // Record the check so the UI can render a report and history.
+        $helperStatus = is_array($helper) ? ($helper['status'] ?? null) : null;
+        $db->insert('app_health_checks', [
+            'app_id'        => $id,
+            'app_slug'      => $app['slug'],
+            'status'        => $overall,
+            'trigger_type'  => $trigger === 'auto' ? 'auto' : 'manual',
+            'http_ok'       => $http !== null ? ($http['ok'] ? 1 : 0) : null,
+            'http_status'   => $http['status'] ?? null,
+            'http_time_ms'  => $http['time_ms'] ?? null,
+            'helper_ok'     => $helper !== null ? 1 : 0,
+            'helper_status' => $helperStatus,
+            'detail'        => json_encode($result['checks'], JSON_UNESCAPED_SLASHES),
+        ]);
+        // Retention: keep 60 days of history.
+        $db->exec('DELETE FROM app_health_checks WHERE checked_at < (NOW() - INTERVAL 60 DAY)');
+
         $result['status'] = $overall;
+        $result['trigger'] = $trigger === 'auto' ? 'auto' : 'manual';
         return ['ok' => true] + $result;
+    }
+
+    /**
+     * Run health checks for every managed app whose last check is older than
+     * the configured interval. Called by the monitor worker so checks run
+     * automatically. Returns a per-app summary.
+     */
+    public static function checkAll(?int $intervalMin = null): array
+    {
+        $interval = $intervalMin ?? (int) config('app.health_interval_min', 5);
+        if ($interval <= 0) {
+            return ['checked' => 0, 'skipped' => 0, 'results' => [], 'disabled' => true];
+        }
+        $interval = max(1, min($interval, 1440));
+
+        $apps = Database::instance()->all(
+            "SELECT id FROM managed_apps
+             WHERE managed = 1 AND status <> 'disabled'
+               AND (health_url IS NOT NULL AND health_url <> ''
+                    OR domain IS NOT NULL AND domain <> ''
+                    OR helper_url IS NOT NULL AND helper_url <> '')
+               AND (last_checked IS NULL OR last_checked <= (NOW() - INTERVAL {$interval} MINUTE))"
+        );
+
+        $results = [];
+        foreach ($apps as $row) {
+            $results[] = self::checkHealth((int) $row['id'], 'auto');
+        }
+        return ['checked' => count($results), 'interval_min' => $interval, 'results' => $results];
+    }
+
+    /** Recent health check history for one app (newest first). */
+    public static function healthHistory(int $id, int $limit = 20): array
+    {
+        $limit = max(1, min($limit, 100));
+        $rows = Database::instance()->all(
+            "SELECT id, status, trigger_type, http_ok, http_status, http_time_ms,
+                    helper_ok, helper_status, detail, checked_at
+             FROM app_health_checks WHERE app_id = ?
+             ORDER BY checked_at DESC LIMIT {$limit}",
+            [$id]
+        );
+        foreach ($rows as &$r) {
+            $r['detail'] = $r['detail'] ? json_decode((string) $r['detail'], true) : null;
+        }
+        return $rows;
+    }
+
+    /**
+     * Full health report for the UI modal: the app, whether checks run
+     * automatically + how often, current status/last-checked, and history.
+     */
+    public static function healthReport(int $id, int $historyLimit = 20): array
+    {
+        $app = self::find($id);
+        if (!$app) {
+            return ['ok' => false, 'error' => 'not found'];
+        }
+        $interval = (int) config('app.health_interval_min', 5);
+        return [
+            'ok'   => true,
+            'app'  => [
+                'id'           => (int) $app['id'],
+                'name'         => $app['name'],
+                'slug'         => $app['slug'],
+                'status'       => $app['status'],
+                'health_url'   => $app['health_url'] ?? null,
+                'last_health'  => $app['last_health'] ?? null,
+                'last_checked' => $app['last_checked'] ?? null,
+            ],
+            'auto' => [
+                'enabled'      => $interval > 0,
+                'interval_min' => $interval,
+                'source'       => 'monitor worker (bin/collect-metrics.php)',
+            ],
+            'history' => self::healthHistory($id, $historyLimit),
+        ];
     }
 
     private static function httpProbe(string $url): array

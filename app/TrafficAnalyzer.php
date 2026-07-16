@@ -369,6 +369,8 @@ final class TrafficAnalyzer
                 'errors'    => (int) $r['errors'],
                 'blocked'   => (int) $r['blocked_bytes'] > 0,
                 'blocked_bytes' => (int) $r['blocked_bytes'],
+                'datacenter' => (bool) ($r['is_datacenter'] ?? false),
+                'proxy'      => (bool) ($r['is_proxy'] ?? false),
                 'apps'      => $r['apps'] ? explode(',', $r['apps']) : [],
             ];
         }
@@ -492,6 +494,302 @@ final class TrafficAnalyzer
     }
 
     // =================================================================
+    // Entity drill-downs (Traffic Map)
+    // =================================================================
+
+    /**
+     * Everything we know about a single source IP: geo + owning network,
+     * whether it's a data center / proxy, its reputation (blocked history +
+     * NIDS threats), a volume/activity summary, and the services, ports and
+     * applications it touched. Powers the IP detail panel.
+     */
+    public static function ipDetail(string $ip, int $hours = 24): array
+    {
+        $hours = self::clampHours($hours);
+        $db = Database::instance();
+
+        $geo = $db->one('SELECT * FROM geo_cache WHERE ip_address = ?', [$ip]);
+
+        // Volume / activity over the window.
+        $act = $db->one(
+            "SELECT
+                SUM(CASE WHEN kind IN ('allow','app') THEN requests ELSE 0 END) AS requests,
+                SUM(CASE WHEN kind IN ('allow','app') THEN bytes ELSE 0 END)    AS bytes,
+                SUM(errors)                                                     AS errors,
+                SUM(CASE WHEN kind = 'block' THEN bytes ELSE 0 END)             AS blocked_bytes,
+                SUM(CASE WHEN kind = 'block' THEN requests ELSE 0 END)          AS blocked_packets,
+                MIN(created_at) AS first_seen, MAX(created_at) AS last_seen,
+                COUNT(*) AS events
+             FROM traffic_events
+             WHERE src_ip = ? AND created_at >= (NOW() - INTERVAL {$hours} HOUR)",
+            [$ip]
+        ) ?? [];
+
+        // Services / applications this IP reached (managed app or vhost).
+        $services = $db->all(
+            "SELECT COALESCE(NULLIF(app_slug, ''), NULLIF(host, ''), 'server') AS service,
+                    MAX(app_id) AS app_id,
+                    SUM(requests) AS requests, SUM(bytes) AS bytes, SUM(errors) AS errors
+             FROM traffic_events
+             WHERE src_ip = ? AND kind IN ('allow','app')
+               AND created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             GROUP BY service ORDER BY bytes DESC LIMIT 50",
+            [$ip]
+        );
+
+        // Top endpoints / URLs hit.
+        $endpoints = $db->all(
+            "SELECT top_path AS path, method, MAX(status_sample) AS status,
+                    SUM(requests) AS requests, SUM(bytes) AS bytes, SUM(errors) AS errors
+             FROM traffic_events
+             WHERE src_ip = ? AND top_path IS NOT NULL AND top_path <> ''
+               AND created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             GROUP BY top_path, method ORDER BY requests DESC LIMIT 50",
+            [$ip]
+        );
+
+        // Ports this IP probed / attacked (only NIDS records a destination port).
+        $ports = $db->all(
+            "SELECT dst_port AS port, category, MAX(severity) AS severity, SUM(count) AS hits,
+                    MAX(created_at) AS last_seen
+             FROM nids_events
+             WHERE src_ip = ? AND dst_port IS NOT NULL
+               AND created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             GROUP BY dst_port, category ORDER BY hits DESC LIMIT 50",
+            [$ip]
+        );
+
+        // Recent per-app request lines for this IP.
+        $recent = $db->all(
+            "SELECT app_slug, method, path, status_code, bytes, level, message,
+                    COALESCE(logged_at, created_at) AS at
+             FROM app_log_events WHERE src_ip = ? ORDER BY id DESC LIMIT 40",
+            [$ip]
+        );
+
+        return [
+            'ip'         => $ip,
+            'geo'        => self::geoView($geo),
+            'reputation' => self::reputation($ip),
+            'activity'   => [
+                'requests'        => (int) ($act['requests'] ?? 0),
+                'bytes'           => (int) ($act['bytes'] ?? 0),
+                'errors'          => (int) ($act['errors'] ?? 0),
+                'blocked_bytes'   => (int) ($act['blocked_bytes'] ?? 0),
+                'blocked_packets' => (int) ($act['blocked_packets'] ?? 0),
+                'events'          => (int) ($act['events'] ?? 0),
+                'first_seen'      => $act['first_seen'] ?? null,
+                'last_seen'       => $act['last_seen'] ?? null,
+            ],
+            'services'  => $services,
+            'endpoints' => $endpoints,
+            'ports'     => $ports,
+            'recent'    => $recent,
+            'window_hours' => $hours,
+        ];
+    }
+
+    /**
+     * Every source IP owned by an ISP / network, with each IP's volume and the
+     * services it touched. Powers the ISP drill-down (ISP -> its IPs).
+     */
+    public static function ispSources(string $isp, int $hours = 24, int $limit = 250): array
+    {
+        $hours = self::clampHours($hours);
+        $limit = max(1, min($limit, 1000));
+        $unknown = ($isp === '' || strcasecmp($isp, 'Unknown') === 0);
+        $where   = $unknown ? "(g.isp IS NULL OR g.isp = '')" : 'g.isp = ?';
+        $params  = $unknown ? [] : [$isp];
+
+        $rows = Database::instance()->all(
+            "SELECT t.src_ip,
+                    SUM(CASE WHEN t.kind IN ('allow','app') THEN t.requests ELSE 0 END) AS requests,
+                    SUM(t.bytes) AS bytes, SUM(t.errors) AS errors,
+                    SUM(CASE WHEN t.kind = 'block' THEN t.bytes ELSE 0 END) AS blocked_bytes,
+                    GROUP_CONCAT(DISTINCT NULLIF(COALESCE(t.app_slug, t.host), '')
+                        ORDER BY COALESCE(t.app_slug, t.host) SEPARATOR ', ') AS services,
+                    g.country, g.country_code, g.city, g.isp, g.org, g.asn,
+                    g.hosting, g.proxy, g.mobile,
+                    EXISTS(SELECT 1 FROM blocked_hosts b WHERE b.ip_address = t.src_ip) AS ever_blocked
+             FROM traffic_events t
+             LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
+             WHERE {$where} AND t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             GROUP BY t.src_ip, g.country, g.country_code, g.city, g.isp, g.org, g.asn,
+                      g.hosting, g.proxy, g.mobile
+             ORDER BY bytes DESC LIMIT {$limit}",
+            $params
+        );
+
+        foreach ($rows as &$r) {
+            $net = self::classifyNetwork($r);
+            $r['is_datacenter'] = $net['is_datacenter'];
+            $r['is_proxy']      = $net['is_proxy'];
+            $r['is_mobile']     = $net['is_mobile'];
+            $r['ever_blocked']  = (int) ($r['ever_blocked'] ?? 0) > 0;
+        }
+        unset($r);
+
+        return [
+            'isp'          => $unknown ? 'Unknown' : $isp,
+            'sources'      => $rows,
+            'window_hours' => $hours,
+        ];
+    }
+
+    /**
+     * Every ISP / network seen in a country, with per-ISP IP counts and volume.
+     * Powers the country drill-down (country -> ISPs -> IPs).
+     */
+    public static function countryIsps(string $code, int $hours = 24, int $limit = 200): array
+    {
+        $hours = self::clampHours($hours);
+        $limit = max(1, min($limit, 1000));
+        $unknown = ($code === '' || strcasecmp($code, 'Unknown') === 0);
+        $where   = $unknown ? 'g.country_code IS NULL' : 'g.country_code = ?';
+        $params  = $unknown ? [] : [strtoupper($code)];
+
+        $rows = Database::instance()->all(
+            "SELECT COALESCE(NULLIF(g.isp, ''), 'Unknown') AS isp, g.asn,
+                    MAX(g.country) AS country,
+                    COUNT(DISTINCT t.src_ip) AS sources,
+                    SUM(CASE WHEN t.kind IN ('allow','app') THEN t.requests ELSE 0 END) AS requests,
+                    SUM(t.bytes) AS bytes,
+                    SUM(CASE WHEN t.kind = 'block' THEN t.bytes ELSE 0 END) AS blocked_bytes,
+                    MAX(g.hosting) AS hosting
+             FROM traffic_events t
+             JOIN geo_cache g ON g.ip_address = t.src_ip
+             WHERE {$where} AND t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+             GROUP BY isp, g.asn
+             ORDER BY bytes DESC LIMIT {$limit}",
+            $params
+        );
+
+        foreach ($rows as &$r) {
+            $r['is_datacenter'] = self::classifyNetwork($r)['is_datacenter'];
+        }
+        unset($r);
+
+        return [
+            'country_code' => $unknown ? null : strtoupper($code),
+            'isps'         => $rows,
+            'window_hours' => $hours,
+        ];
+    }
+
+    // =================================================================
+    // Entity detail helpers
+    // =================================================================
+
+    /** Shape a geo_cache row for the front-end, adding network classification. */
+    private static function geoView(?array $geo): array
+    {
+        $net = self::classifyNetwork($geo);
+        return [
+            'country'      => $geo['country'] ?? null,
+            'country_code' => $geo['country_code'] ?? null,
+            'region'       => $geo['region'] ?? null,
+            'city'         => $geo['city'] ?? null,
+            'lat'          => isset($geo['lat']) && $geo['lat'] !== null ? (float) $geo['lat'] : null,
+            'lng'          => isset($geo['lng']) && $geo['lng'] !== null ? (float) $geo['lng'] : null,
+            'isp'          => $geo['isp'] ?? null,
+            'org'          => $geo['org'] ?? null,
+            'asn'          => $geo['asn'] ?? null,
+            'is_datacenter' => $net['is_datacenter'],
+            'is_proxy'      => $net['is_proxy'],
+            'is_mobile'     => $net['is_mobile'],
+        ];
+    }
+
+    /**
+     * Reputation summary for an IP: current firewall block state, full block
+     * history, and any NIDS threat activity ever recorded against it.
+     */
+    private static function reputation(string $ip): array
+    {
+        $db = Database::instance();
+
+        $block = $db->one(
+            "SELECT COUNT(*) AS total,
+                    SUM(CASE WHEN active = 1 AND unblocked_at IS NULL
+                              AND (permanent = 1 OR expires_at IS NULL OR expires_at > NOW())
+                             THEN 1 ELSE 0 END) AS active,
+                    MAX(blocked_at) AS last_blocked_at
+             FROM blocked_hosts WHERE ip_address = ?",
+            [$ip]
+        ) ?? [];
+        $lastReason = $db->scalar(
+            "SELECT reason FROM blocked_hosts WHERE ip_address = ? ORDER BY blocked_at DESC LIMIT 1",
+            [$ip]
+        );
+
+        $threat = $db->one(
+            "SELECT COUNT(*) AS events, SUM(count) AS hits, MAX(severity) AS max_severity,
+                    MAX(created_at) AS last_seen,
+                    GROUP_CONCAT(DISTINCT category ORDER BY category SEPARATOR ', ') AS categories
+             FROM nids_events WHERE src_ip = ?",
+            [$ip]
+        ) ?? [];
+
+        $blockedNow  = (int) ($block['active'] ?? 0) > 0;
+        $everBlocked = (int) ($block['total'] ?? 0) > 0;
+        $threatEvents = (int) ($threat['events'] ?? 0);
+
+        return [
+            'blocked_now'     => $blockedNow,
+            'ever_blocked'    => $everBlocked,
+            'block_count'     => (int) ($block['total'] ?? 0),
+            'last_blocked_at' => $block['last_blocked_at'] ?? null,
+            'last_reason'     => $lastReason ? (string) $lastReason : null,
+            'threat_events'   => $threatEvents,
+            'threat_hits'     => (int) ($threat['hits'] ?? 0),
+            'threat_severity' => $threat['max_severity'] ?? null,
+            'threat_last_seen' => $threat['last_seen'] ?? null,
+            'threat_categories' => $threat['categories'] ?? null,
+            // A compact verdict for the badge in the UI.
+            'flagged'         => $blockedNow || $everBlocked || $threatEvents > 0,
+        ];
+    }
+
+    /**
+     * Classify a network from geo flags, falling back to an ISP/org name
+     * heuristic when the provider didn't populate the hosting flag (older
+     * cached rows or the 'none' provider).
+     *
+     * @return array{is_datacenter:bool,is_proxy:bool,is_mobile:bool}
+     */
+    private static function classifyNetwork(?array $geo): array
+    {
+        $hosting = isset($geo['hosting']) && $geo['hosting'] !== null ? (bool) $geo['hosting'] : null;
+        $proxy   = isset($geo['proxy'])   && $geo['proxy']   !== null ? (bool) $geo['proxy']   : null;
+        $mobile  = isset($geo['mobile'])  && $geo['mobile']  !== null ? (bool) $geo['mobile']  : null;
+
+        if ($hosting === null && $geo) {
+            $name = strtolower(trim(($geo['isp'] ?? '') . ' ' . ($geo['org'] ?? '')));
+            if ($name !== '') {
+                static $needles = [
+                    'amazon', 'aws', 'ec2', 'google', 'gcp', 'azure', 'microsoft', 'oracle cloud',
+                    'digitalocean', 'ovh', 'hetzner', 'linode', 'akamai', 'vultr', 'contabo',
+                    'leaseweb', 'datacenter', 'data center', 'hosting', 'colo', 'cloudflare',
+                    'fastly', 'scaleway', 'alibaba', 'tencent', 'choopa', 'hostwinds', 'upcloud',
+                    'server', 'dedicated', 'vps',
+                ];
+                foreach ($needles as $n) {
+                    if (str_contains($name, $n)) {
+                        $hosting = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        return [
+            'is_datacenter' => (bool) $hosting,
+            'is_proxy'      => (bool) $proxy,
+            'is_mobile'     => (bool) $mobile,
+        ];
+    }
+
+    // =================================================================
     // Internals
     // =================================================================
 
@@ -502,20 +800,31 @@ final class TrafficAnalyzer
     private static function sourceAggregate(int $hours): array
     {
         $hours = self::clampHours($hours);
-        return Database::instance()->all(
+        $rows = Database::instance()->all(
             "SELECT t.src_ip,
                     SUM(t.requests) AS requests,
                     SUM(t.bytes) AS bytes,
                     SUM(t.errors) AS errors,
                     SUM(CASE WHEN t.kind = 'block' THEN t.bytes ELSE 0 END) AS blocked_bytes,
                     GROUP_CONCAT(DISTINCT NULLIF(t.app_slug, '')) AS apps,
-                    g.country, g.country_code, g.city, g.isp, g.lat, g.lng
+                    MAX(t.top_path) AS top_path,
+                    g.country, g.country_code, g.city, g.isp, g.org, g.asn,
+                    g.hosting, g.proxy, g.mobile, g.lat, g.lng
              FROM traffic_events t
              LEFT JOIN geo_cache g ON g.ip_address = t.src_ip
              WHERE t.created_at >= (NOW() - INTERVAL {$hours} HOUR)
-             GROUP BY t.src_ip, g.country, g.country_code, g.city, g.isp, g.lat, g.lng
+             GROUP BY t.src_ip, g.country, g.country_code, g.city, g.isp, g.org, g.asn,
+                      g.hosting, g.proxy, g.mobile, g.lat, g.lng
              ORDER BY bytes DESC"
         );
+        foreach ($rows as &$r) {
+            $net = self::classifyNetwork($r);
+            $r['is_datacenter'] = $net['is_datacenter'];
+            $r['is_proxy']      = $net['is_proxy'];
+            $r['is_mobile']     = $net['is_mobile'];
+        }
+        unset($r);
+        return $rows;
     }
 
     /** Clamp an hours window to a sane, safe integer for inlining into SQL. */

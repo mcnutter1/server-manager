@@ -67,4 +67,14 @@ foreach (ServiceManager::criticalHealth() as $svc) {
 // --- Retention: keep metrics for 30 days ------------------------------
 $db->exec('DELETE FROM metrics WHERE created_at < (NOW() - INTERVAL 30 DAY)');
 
-fwrite(STDOUT, sprintf("[%s] metrics stored; health=%s\n", date('c'), $s['health']['status']));
+// --- Automatic application health checks ------------------------------
+// Re-check managed apps whose last check is older than the configured
+// interval so health status stays fresh without a manual click.
+$health = App\AppManager::checkAll();
+
+fwrite(STDOUT, sprintf(
+    "[%s] metrics stored; health=%s; apps_checked=%d\n",
+    date('c'),
+    $s['health']['status'],
+    $health['checked'] ?? 0
+));

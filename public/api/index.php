@@ -179,6 +179,27 @@ $post('/nids/unblock', static function () use ($input) {
     Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
 });
 
+// Never-block allowlist (editable; IPv4 / IPv6 / CIDR).
+$get('/nids/never-block', static fn () => Response::ok([
+    'entries' => NidsManager::neverBlockList(),
+    'config'  => NidsManager::configWhitelist(),
+]));
+
+$post('/nids/never-block', static function () use ($input) {
+    Auth::requirePrivileged('nids');
+    $result = NidsManager::addNeverBlock(
+        trim((string) ($input['ip'] ?? '')),
+        isset($input['note']) ? trim((string) $input['note']) : null
+    );
+    Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
+});
+
+$post('/nids/never-block/remove', static function () use ($input) {
+    Auth::requirePrivileged('nids');
+    $result = NidsManager::removeNeverBlock(trim((string) ($input['ip'] ?? '')));
+    Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
+});
+
 $post('/nids/events', static function () use ($input) {
     Auth::requirePrivileged('nids');
     $id = NidsManager::recordEvent(
@@ -255,7 +276,12 @@ $post('/apps/(?<id>\d+)/status', static function ($p) use ($input) {
 });
 
 $post('/apps/(?<id>\d+)/health', static function ($p) {
-    Response::ok(AppManager::checkHealth((int) $p['id']));
+    AppManager::checkHealth((int) $p['id'], 'manual');
+    Response::ok(AppManager::healthReport((int) $p['id']));
+});
+
+$get('/apps/(?<id>\d+)/health', static function ($p) {
+    Response::ok(AppManager::healthReport((int) $p['id']));
 });
 
 $post('/apps/(?<id>\d+)/helper', static function ($p) use ($input) {
@@ -302,6 +328,28 @@ $get('/traffic/isps', static function () {
 
 $get('/traffic/apps', static function () {
     Response::ok(TrafficAnalyzer::byApp((int) ($_GET['hours'] ?? 24)));
+});
+
+// Entity drill-downs: IP -> services/ports/apps, ISP -> IPs, country -> ISPs.
+$get('/traffic/ip', static function () {
+    $ip = trim((string) ($_GET['ip'] ?? ''));
+    if (!is_valid_ip($ip)) {
+        Response::error('a valid ip parameter is required', 400);
+    }
+    Response::ok(TrafficAnalyzer::ipDetail($ip, (int) ($_GET['hours'] ?? 24)));
+});
+
+$get('/traffic/isp', static function () {
+    $isp = trim((string) ($_GET['isp'] ?? ''));
+    if ($isp === '') {
+        Response::error('an isp parameter is required', 400);
+    }
+    Response::ok(TrafficAnalyzer::ispSources($isp, (int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 250)));
+});
+
+$get('/traffic/country', static function () {
+    $code = trim((string) ($_GET['code'] ?? ''));
+    Response::ok(TrafficAnalyzer::countryIsps($code, (int) ($_GET['hours'] ?? 24), (int) ($_GET['limit'] ?? 200)));
 });
 
 $post('/traffic/ingest', static function () {
