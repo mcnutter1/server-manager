@@ -80,6 +80,21 @@
   </section>
 
   <section>
+    <h2>For AI diagnostics <span class="pill">read-only</span></h2>
+    <p>Debugging why a managed app is unhealthy? Hand an AI agent a
+       <code>diag</code>-scoped API key (generate one in
+       <b>Settings → AI diagnostics access</b>) and point it at the skill page.
+       It exposes a read-only view of logs, the database, the audit trail and
+       <b>live</b> helper probes.</p>
+    <div class="grid">
+      <a href="diagnostics.txt"><b>diagnostics.txt</b><span>Read-only diagnostics skill for AI agents</span></a>
+    </div>
+    <p style="margin-top:14px;color:var(--muted)">Prompt example:
+       <em>“Fetch <code>/integrate/diagnostics.txt</code>. Using the diag token
+       I gave you, probe app&nbsp;#12 and tell me why its services are down.”</em></p>
+  </section>
+
+  <section>
     <h2>The contract</h2>
     <pre><code>POST https://&lt;app-domain&gt;/&lt;helper_path&gt;      default helper_path: srvmgr/helper.php
 Content-Type: application/json

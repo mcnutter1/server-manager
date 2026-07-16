@@ -27,6 +27,8 @@ use App\LogAnalyzer;
 use App\TrafficAnalyzer;
 use App\Notifier;
 use App\Runner;
+use App\Diagnostics;
+use App\AuditLogger;
 use App\Database;
 use function App\is_valid_ip;
 
@@ -544,6 +546,153 @@ $post('/settings/reset', static function () use ($input) {
     }
     $result = Settings::reset($key, Auth::currentActor()['name']);
     Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
+});
+
+// =====================================================================
+// AI / LLM diagnostics interface (read-only, "diag" scope).
+//
+// A key-protected, READ-ONLY window into logs, the database, the audit trail
+// and live app/API interactions so an operator (or an AI agent handed a
+// `diag`-scoped token) can work out why a downstream app is misbehaving.
+// Create the key with:  php bin/token.php create ai-diag diag
+// See docs/DIAGNOSTICS.md.
+// =====================================================================
+$get('/diag', static function () {
+    Auth::requirePrivileged('diag');
+    Response::ok(Diagnostics::catalog());
+});
+
+$get('/diag/overview', static function () {
+    Auth::requirePrivileged('diag');
+    Response::ok(Diagnostics::overview());
+});
+
+$get('/diag/apps', static function () {
+    Auth::requirePrivileged('diag');
+    Response::ok(Diagnostics::apps());
+});
+
+$get('/diag/apps/(?<id>\d+)/probe', static function ($p) use ($input) {
+    Auth::requirePrivileged('diag');
+    $actions = null;
+    if (!empty($input['actions'])) {
+        $actions = array_filter(array_map('trim', explode(',', (string) $input['actions'])));
+    }
+    $res = Diagnostics::probeApp((int) $p['id'], $actions);
+    Response::json(['ok' => $res['ok'], 'data' => $res], $res['ok'] ? 200 : 404);
+});
+
+$get('/diag/apps/(?<id>\d+)/health-checks', static function ($p) use ($input) {
+    Auth::requirePrivileged('diag');
+    Response::ok(Diagnostics::healthChecks((int) $p['id'], (int) ($input['limit'] ?? 20)));
+});
+
+$get('/diag/logs', static function () use ($input) {
+    Auth::requirePrivileged('diag');
+    Response::ok(Diagnostics::logs($input));
+});
+
+$get('/diag/audit', static function () use ($input) {
+    Auth::requirePrivileged('diag');
+    Response::ok(Diagnostics::audit($input));
+});
+
+$get('/diag/schema', static function () use ($input) {
+    Auth::requirePrivileged('diag');
+    Response::ok(Diagnostics::schema(isset($input['table']) ? (string) $input['table'] : null));
+});
+
+$post('/diag/query', static function () use ($input) {
+    Auth::requirePrivileged('diag');
+    $sql = (string) ($input['sql'] ?? '');
+    if (trim($sql) === '') {
+        Response::error('Missing "sql".', 400);
+        return;
+    }
+    $res = Diagnostics::query($sql, (int) ($input['limit'] ?? 200));
+    Response::json(['ok' => $res['ok'], 'data' => $res], $res['ok'] ? 200 : 400);
+});
+
+// The human/AI-readable skill page. Served publicly at /integrate/diagnostics.txt
+// too; this in-band copy lets a token holder fetch it without a second host.
+$get('/diag/guide', static function () {
+    Auth::requirePrivileged('diag');
+    $file = SM_ROOT . '/public/integrate/diagnostics.txt';
+    $text = is_readable($file) ? (string) file_get_contents($file) : 'Guide unavailable.';
+    header('Content-Type: text/plain; charset=utf-8');
+    echo $text;
+    exit;
+});
+
+// -- Diagnostics key management (admin only) --------------------------
+// Minting/revoking diag tokens is a privileged write, so it requires the
+// 'admin' role — a diag token itself must NOT be able to create more tokens.
+$get('/diag/keys', static function () {
+    Auth::requirePrivileged('admin');
+    $rows = Database::instance()->all(
+        "SELECT id, name, created_by, last_used_at, expires_at, revoked, created_at
+         FROM api_tokens
+         WHERE JSON_CONTAINS(scopes, '\"diag\"') OR JSON_CONTAINS(scopes, '\"*\"')
+         ORDER BY id DESC"
+    );
+    $now = time();
+    $keys = array_map(static function ($r) use ($now) {
+        $expired = !empty($r['expires_at']) && strtotime((string) $r['expires_at']) < $now;
+        return [
+            'id'           => (int) $r['id'],
+            'name'         => $r['name'],
+            'created_by'   => $r['created_by'],
+            'last_used_at' => $r['last_used_at'],
+            'expires_at'   => $r['expires_at'],
+            'revoked'      => (bool) $r['revoked'],
+            'expired'      => $expired,
+            'active'       => !$r['revoked'] && !$expired,
+            'created_at'   => $r['created_at'],
+        ];
+    }, $rows);
+    Response::ok(['keys' => $keys]);
+});
+
+$post('/diag/keys', static function () use ($input) {
+    Auth::requirePrivileged('admin');
+    $name = trim((string) ($input['name'] ?? 'ai-diag'));
+    if ($name === '') {
+        $name = 'ai-diag';
+    }
+    if (!preg_match('/^[\w .\-]{1,120}$/', $name)) {
+        Response::error('Invalid name (letters, numbers, space, dot, dash only).', 400);
+        return;
+    }
+    $days = (int) ($input['expires_days'] ?? 7);
+    $days = max(0, min($days, 365));
+
+    $raw = 'smgr_' . bin2hex(random_bytes(24));
+    $id  = Database::instance()->insert('api_tokens', [
+        'name'       => $name,
+        'token_hash' => hash('sha256', $raw),
+        'scopes'     => json_encode(['diag']),
+        'created_by' => Auth::currentActor()['name'],
+        'expires_at' => $days > 0 ? date('Y-m-d H:i:s', time() + $days * 86400) : null,
+    ]);
+    AuditLogger::log('diag.key.create', $name, ['id' => $id, 'expires_days' => $days]);
+
+    Response::ok(
+        [
+            'id'           => $id,
+            'name'         => $name,
+            'token'        => $raw,           // shown once
+            'scope'        => 'diag',
+            'expires_days' => $days ?: null,
+        ],
+        ['message' => 'Copy this token now — it is shown only once.']
+    );
+});
+
+$post('/diag/keys/(?<id>\d+)/revoke', static function ($p) {
+    Auth::requirePrivileged('admin');
+    Database::instance()->exec('UPDATE api_tokens SET revoked = 1 WHERE id = ?', [(int) $p['id']]);
+    AuditLogger::log('diag.key.revoke', (string) $p['id']);
+    Response::ok(['revoked' => true]);
 });
 
 // ---------------------------------------------------------------------

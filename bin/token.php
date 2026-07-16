@@ -6,6 +6,11 @@
  *   php bin/token.php list
  *   php bin/token.php revoke <id>
  *
+ * Scopes: read, services, firewall, nids, apps, runner, admin, diag, "*".
+ * The `diag` scope unlocks the read-only AI diagnostics interface
+ * (GET/POST /api/diag/*, see docs/DIAGNOSTICS.md):
+ *   php bin/token.php create ai-diag diag 7
+ *
  * The raw token is shown ONCE on creation. Only its SHA-256 is stored.
  * Use it as:  Authorization: Bearer smgr_xxxxxxxx
  */

@@ -931,6 +931,76 @@ final class AppManager
     }
 
     /**
+     * Diagnostics-grade helper probe. Unlike callHelper() this NEVER throws and
+     * NEVER hides the raw response: it returns the HTTP status, transport error,
+     * timing, whether the body parsed as JSON, the app-reported error and a
+     * truncated raw body. Read-only — intended for the /diag interface so an
+     * operator (or AI) can see exactly what a downstream helper returned.
+     *
+     * @return array{action:string,url:?string,http_status:int,ms:int,ok:bool,parsed:mixed,raw:?string,...}
+     */
+    public static function rawHelperCall(int $id, string $action, array $params = []): array
+    {
+        $app = self::find($id);
+        if (!$app) {
+            return ['action' => $action, 'ok' => false, 'error' => 'app not found'];
+        }
+        if (empty($app['domain']) && empty($app['helper_url'])) {
+            return ['action' => $action, 'ok' => false, 'error' => 'no helper configured (no domain/helper_url)'];
+        }
+
+        $base = !empty($app['helper_url'])
+            ? $app['helper_url']
+            : rtrim('https://' . $app['domain'], '/') . '/' . ltrim((string) $app['helper_path'], '/');
+
+        $secret = (string) ($app['helper_token'] ?? '');
+        $body   = json_encode(['action' => $action] + $params, JSON_UNESCAPED_SLASHES);
+        $headers = array_merge(
+            ['Content-Type: application/json'],
+            self::signHeaders($base, (string) $body, $secret)
+        );
+
+        $ch = curl_init($base);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 12,
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_POSTFIELDS     => $body,
+        ]);
+        $t0    = microtime(true);
+        $resp  = curl_exec($ch);
+        $ms    = (int) round((microtime(true) - $t0) * 1000);
+        $code  = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $ctype = curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+        $cerr  = curl_error($ch);
+        curl_close($ch);
+
+        $json = is_string($resp) ? json_decode($resp, true) : null;
+
+        $out = [
+            'action'       => $action,
+            'url'          => $base,
+            'http_status'  => $code,
+            'ms'           => $ms,
+            'content_type' => $ctype ?: null,
+            'ok'           => ($code >= 200 && $code < 300 && is_array($json) && ($json['ok'] ?? true)),
+            'parsed'       => is_array($json) ? ($json['data'] ?? $json) : null,
+            'raw'          => is_string($resp) ? mb_substr($resp, 0, 4000) : null,
+        ];
+        if ($cerr !== '') {
+            $out['transport_error'] = $cerr;
+        }
+        if (is_array($json) && isset($json['error'])) {
+            $out['app_error'] = $json['error'];
+        }
+        if ($resp !== false && !is_array($json)) {
+            $out['note'] = 'response body was not valid JSON';
+        }
+        return $out;
+    }
+
+    /**
      * Build the signed authentication headers for a helper request.
      *
      * @return string[] header lines ready for CURLOPT_HTTPHEADER

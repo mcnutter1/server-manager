@@ -1888,24 +1888,97 @@
                 '<div id="settingsGroups"></div>' +
                 '<div class="section-head" style="margin-top:24px"><h2>Never block <span class="sub">allowlist · IPv4 · IPv6 · CIDR</span></h2>' +
                 '<div class="actions"><button class="btn" id="nbAddBtn">＋ Add address</button></div></div>' +
-                '<div class="card"><p class="muted" style="margin-top:0">These addresses and ranges are never auto-blocked or manually blocked, protecting your own control-plane, monitoring and office IPs.</p><div id="nbTable"></div></div>'
+                '<div class="card"><p class="muted" style="margin-top:0">These addresses and ranges are never auto-blocked or manually blocked, protecting your own control-plane, monitoring and office IPs.</p><div id="nbTable"></div></div>' +
+                '<div class="section-head" style="margin-top:24px"><h2>AI diagnostics access <span class="sub">read-only · <code>diag</code>-scoped API keys</span></h2>' +
+                '<div class="actions"><button class="btn primary" id="diagKeyGen">＋ Generate key</button></div></div>' +
+                '<div class="card"><p class="muted" style="margin-top:0">Generate a read-only <code>diag</code> key so an AI assistant can inspect logs, the database and live app probes via <code>/api/diag</code> to diagnose failing apps. The key is shown once. Skill guide: <a href="/integrate/diagnostics.txt" target="_blank" rel="noopener">/integrate/diagnostics.txt</a></p><div id="diagKeyTable"></div></div>'
             );
             $('#settingsSave').on('click', () => this.save());
             $('#settingsAdvanced').on('change', function () {
                 $('#settingsGroups').toggleClass('show-advanced', $(this).is(':checked'));
             });
             $('#nbAddBtn').on('click', () => this.neverBlockModal());
+            $('#diagKeyGen').on('click', () => this.generateDiagKey());
             this.load();
         },
         load() {
             this.loadStats();
             this.loadSettings();
             this.loadNeverBlock();
+            this.loadDiagKeys();
         },
         // Manual refresh only re-pulls statistics so the editable form and any
         // unsaved edits are preserved.
         refresh() {
             this.loadStats();
+        },
+        // ---- AI diagnostics keys -------------------------------------
+        loadDiagKeys() {
+            API.get('/diag/keys').then((r) => this.renderDiagKeys((r.data && r.data.keys) || []));
+        },
+        renderDiagKeys(keys) {
+            const self = this;
+            if (!keys.length) {
+                $('#diagKeyTable').html('<p class="muted" style="margin:0">No diagnostics keys yet. Generate one to give an AI assistant read-only access.</p>');
+                return;
+            }
+            const rows = keys.map((k) => {
+                const status = k.revoked ? '<span class="badge failed">revoked</span>'
+                    : (k.expired ? '<span class="badge">expired</span>' : '<span class="badge active">active</span>');
+                const act = k.active ? '<button class="btn small danger" data-revokekey="' + k.id + '">Revoke</button>' : '';
+                return '<tr><td><strong>' + H.esc(k.name) + '</strong></td>' +
+                    '<td>' + status + '</td>' +
+                    '<td class="muted">' + (k.last_used_at ? H.ago(k.last_used_at) : 'never') + '</td>' +
+                    '<td class="muted">' + (k.expires_at ? H.esc(k.expires_at) : 'never') + '</td>' +
+                    '<td class="muted">' + H.esc(k.created_by || '—') + '</td>' +
+                    '<td style="text-align:right">' + act + '</td></tr>';
+            }).join('');
+            $('#diagKeyTable').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                '<th>Name</th><th>Status</th><th>Last used</th><th>Expires</th><th>Created by</th><th></th></tr></thead><tbody>' +
+                rows + '</tbody></table></div>');
+            $('#diagKeyTable [data-revokekey]').on('click', function () {
+                const id = $(this).data('revokekey');
+                UI.confirm('Revoke this diagnostics key? Any AI or client using it loses access immediately.', () => {
+                    API.post('/diag/keys/' + id + '/revoke').then(() => {
+                        UI.toast('success', 'Key revoked');
+                        self.loadDiagKeys();
+                    });
+                });
+            });
+        },
+        generateDiagKey() {
+            const self = this;
+            UI.modal('Generate diagnostics key',
+                '<div class="field"><label>Name</label><input name="name" value="ai-diag" placeholder="ai-diag"></div>' +
+                '<div class="field"><label>Expires in (days · 0 = never)</label>' +
+                '<input name="expires_days" type="number" min="0" max="365" value="7"></div>' +
+                '<p class="muted" style="margin-bottom:0">Creates a read-only <code>diag</code>-scoped API key. It is shown only once.</p>',
+                (data, close) => {
+                    API.post('/diag/keys', {
+                        name: (data.name || 'ai-diag'),
+                        expires_days: parseInt(data.expires_days, 10) || 0
+                    }).then((res) => {
+                        close();
+                        if (res.data && res.data.token) {
+                            self.showDiagToken(res.data.token);
+                            self.loadDiagKeys();
+                        } else {
+                            UI.toast('error', 'Could not create key', (res.data && res.data.error) || '');
+                        }
+                    });
+                }, 'Generate');
+        },
+        showDiagToken(token) {
+            UI.modal('Diagnostics key created',
+                '<p class="muted" style="margin-top:0">Copy this now — it is shown once and cannot be retrieved later. ' +
+                'Give it to your AI assistant along with this manager\'s base URL.</p>' +
+                '<textarea readonly onclick="this.select()" rows="2" ' +
+                'style="font:600 13px ui-monospace,monospace;width:100%;box-sizing:border-box;background:#1c1c1c;' +
+                'border:1px solid #333;border-radius:8px;padding:12px 14px;color:#7dd3fc;word-break:break-all;resize:vertical">' +
+                H.esc(token) + '</textarea>' +
+                '<p class="muted" style="margin-bottom:0">Use as <code>Authorization: Bearer &lt;token&gt;</code>. ' +
+                'Skill guide: <a href="/integrate/diagnostics.txt" target="_blank" rel="noopener">/integrate/diagnostics.txt</a></p>',
+                (_d, close) => close(), 'Done');
         },
         loadStats() {
             API.get('/settings/stats').then((r) => {

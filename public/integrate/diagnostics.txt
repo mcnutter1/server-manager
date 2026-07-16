@@ -1,0 +1,126 @@
+# Server Manager — AI Diagnostics Interface (skill for AI agents)
+
+> A **read-only**, key-protected window into the platform so an AI agent can
+> work out *why a downstream app's services aren't working* — by inspecting
+> logs, the database, the audit trail and **live** helper/API interactions.
+>
+> Everything here is read-only. Nothing can restart a service, change a setting,
+> block an IP, or write to the database.
+
+## Getting a key
+
+The interface is gated by an API token carrying the `diag` scope. An operator
+creates one in the Server Manager UI (Settings → "AI diagnostics access →
+Generate key") or on the server:
+
+    php bin/token.php create ai-diag diag 7      # scope=diag, expires in 7 days
+
+The raw token (`smgr_...`) is shown once. It is stored server-side only as a
+SHA-256 hash and honours expiry + revocation.
+
+## Authenticating
+
+Send the token as a bearer credential on every request:
+
+    Authorization: Bearer smgr_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+Base URL is the manager's API root, e.g. https://<manager-domain>/api
+
+    curl -s https://<manager-domain>/api/diag \
+      -H "Authorization: Bearer $DIAG_TOKEN"
+
+All responses use the platform envelope: { "ok": true, "data": { ... } }.
+
+## Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET  | /api/diag                          | Self-describing catalogue. |
+| GET  | /api/diag/overview                 | Versions, DB connectivity, 24h counts. |
+| GET  | /api/diag/apps                     | Every registered app + pairing + last health. |
+| GET  | /api/diag/apps/{id}/probe          | LIVE-probe an app helper; RAW response per action. |
+| GET  | /api/diag/apps/{id}/health-checks  | Recent stored health-check history (decoded). |
+| GET  | /api/diag/logs                     | Recent per-app log events. |
+| GET  | /api/diag/audit                    | Recent audit-log entries. |
+| GET  | /api/diag/schema                   | List tables, or columns for one table. |
+| POST | /api/diag/query                    | Guarded read-only SELECT. |
+| GET  | /api/diag/guide                    | This document. |
+
+### GET /api/diag/apps/{id}/probe — the main debugging tool
+
+Calls the app's helper LIVE and returns the RAW result of each action so you can
+see exactly what the app returned. Optional ?actions= is a comma-separated
+subset of health,version,stats,components,commands,logs,ping
+(default: health,version,stats,components,commands).
+
+    curl -s "https://<manager-domain>/api/diag/apps/12/probe?actions=components,commands" \
+      -H "Authorization: Bearer $DIAG_TOKEN"
+
+Each probe entry contains:
+
+- http_status      HTTP status the helper returned (0 = never connected)
+- ms               round-trip time in milliseconds
+- ok               true only if HTTP 2xx AND JSON parsed with ok != false
+- parsed           decoded `data` payload (or full JSON) when it parsed
+- raw              first 4 KB of the raw body (present even when JSON fails)
+- transport_error  cURL/network error (DNS, TLS, timeout) if it never completed
+- app_error        the helper's own `error` string, if any
+- note             "response body was not valid JSON" when the body wasn't JSON
+
+How to read it when services aren't working:
+
+- transport_error present -> networking/TLS/DNS wrong, helper_url wrong, or app down.
+- http_status 401/403      -> pairing secret (helper_token) wrong / signature rejected. Re-pair.
+- http_status 404          -> helper path wrong / helper not deployed.
+- http_status 500 or note  -> helper crashed; the `raw` snippet holds the error/stack trace.
+- ok:true but empty        -> app hasn't implemented that action yet (fine for a minimal helper).
+- app_error set            -> the app rejected the action; read the message.
+
+### GET /api/diag/logs
+
+Recent rows from app_log_events. Optional filters:
+app_id, level, status_min (>= N), q (substring on path/message), hours (default
+24, max 720), limit (default 100, max 1000).
+
+    curl -s "https://<manager-domain>/api/diag/logs?app_id=12&status_min=500&hours=6" \
+      -H "Authorization: Bearer $DIAG_TOKEN"
+
+### GET /api/diag/audit
+
+Recent audit_log entries. Filters: action, target, actor (substring), result
+(success|failure|denied), hours, limit. Look for action like app.helper /
+app.command and whether the manager's own calls to an app succeeded.
+
+### GET /api/diag/schema
+
+No params: lists tables with approximate row counts.
+?table=<name>: returns that table's column definitions so you can craft a query.
+
+### POST /api/diag/query — guarded read-only SQL
+
+Runs a SINGLE SELECT (or WITH) statement.
+
+    { "sql": "SELECT id, slug, last_health FROM managed_apps ORDER BY id", "limit": 100 }
+
+Guardrails: must begin with SELECT/WITH; no ";" (single statement only);
+file-access + timing gadgets blocked (INTO OUTFILE/DUMPFILE, LOAD_FILE, SLEEP,
+BENCHMARK, GET_LOCK); a LIMIT is appended when absent; capped at 1000 rows.
+Response: { ok, row_count, columns, rows }.
+
+## Suggested workflow for "app X's services aren't working"
+
+1. GET /api/diag/overview                         confirm platform + DB healthy.
+2. GET /api/diag/apps                             find the app id; check paired / last_health.
+3. GET /api/diag/apps/{id}/probe                  read health/components/commands; the
+   transport_error / http_status / app_error / raw fields point at the failure.
+4. GET /api/diag/apps/{id}/health-checks          was it ever healthy, when did it change.
+5. GET /api/diag/logs?app_id={id}&status_min=500  recent errors from the app.
+6. GET /api/diag/audit?target={slug}              did the manager's calls to it fail (auth/signature).
+7. GET /api/diag/schema then POST /api/diag/query for a precise read of any table.
+
+## Security notes
+
+- Read-only by design; no endpoint mutates state.
+- Gated by the `diag` scope. Issue short-lived tokens; revoke when done.
+- The SQL runner is powerful but SELECT-only, single-statement, row-capped.
+- Treat the diag token like an admin credential; never paste it in shared logs.
