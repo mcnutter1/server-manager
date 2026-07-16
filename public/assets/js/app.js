@@ -320,10 +320,7 @@
                 '  <div class="card"><h3>Top offenders <span class="sub">24h · click a row for detail</span></h3><div id="offenders"></div></div>' +
                 '  <div class="card"><h3>Recent NIDS events <span class="sub">click a row for detail</span></h3><div id="nidsEvents"></div></div>' +
                 '</div>' +
-                '<div class="grid cols-2" style="margin-top:16px">' +
-                '  <div class="card"><h3>Application activity <span class="sub">requests · errors · volume</span></h3><div id="nidsApps"></div></div>' +
-                '  <div class="card"><h3>System resources <span class="sub">live</span></h3><div id="nidsRes"></div></div>' +
-                '</div>'
+                '<div class="card" style="margin-top:16px"><h3>Application activity <span class="sub">requests · errors · volume</span></h3><div id="nidsApps"></div></div>'
             );
             $('#nidsHours').val(String(this._hours)).on('change', () => {
                 this._hours = Number($('#nidsHours').val()) || 24;
@@ -379,7 +376,6 @@
             API.get('/nids/offenders?limit=25').then((r) => { self._offenders = r.data || []; self.renderOffenders(); });
             API.get('/nids/events?limit=200').then((r) => { self._events = r.data || []; self.renderEvents(); });
             API.get('/traffic/apps?hours=' + this._hours).then((r) => { self._apps = r.data || []; self.renderApps(); }).catch(() => {});
-            API.get('/system/overview').then((r) => self.renderResources(r.data)).catch(() => {});
         },
         renderStats(n) {
             const ti = (n && n.threat_intel) || {};
@@ -505,21 +501,6 @@
                     '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
                 )).join('') : '<tr><td colspan="5" class="muted">' + (all.length ? 'no applications match the filter' : 'no application traffic recorded') + '</td></tr>') +
                 '</tbody></table></div>');
-        },
-        renderResources(d) {
-            if (!d || !d.system) { $('#nidsRes').html('<p class="muted">resources unavailable</p>'); return; }
-            const s = d.system;
-            const bar = (label, pct, sub, warn, crit) => (
-                '<div class="res-row"><div class="res-top"><span>' + H.esc(label) + '</span><span class="mono">' + H.esc(sub) + '</span></div>' +
-                '<div class="meter ' + H.meterClass(pct, warn, crit) + '"><span style="width:' + Math.min(100, pct) + '%"></span></div></div>'
-            );
-            const load = s.load || {};
-            $('#nidsRes').html(
-                bar('CPU', s.cpu.usage_pct, H.pct(s.cpu.usage_pct) + ' · ' + s.cpu.cores + ' cores', 75, 90) +
-                bar('Memory', s.memory.used_pct, H.bytes(s.memory.used) + ' / ' + H.bytes(s.memory.total), 80, 92) +
-                bar('Disk /', s.disk.used_pct, H.bytes(s.disk.free) + ' free', 80, 90) +
-                bar('Load 1m', Math.min(100, (load.per_core_1 || 0) * 100), (load['1'] != null ? load['1'] : '—') + ' · uptime ' + ((s.uptime && s.uptime.human) || '—'), 70, 90)
-            );
         },
 
         // ---- IP dossier drill-down -----------------------------------
