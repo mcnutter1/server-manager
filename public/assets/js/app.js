@@ -429,14 +429,14 @@
         removeTag(i) { this._filter.tags.splice(i, 1); this.renderFilterBar(); this.applyFilters(); },
         clearTags() { if (!this._filter.tags.length) { return; } this._filter.tags = []; this.renderFilterBar(); this.applyFilters(); },
         toggleLogic() { this._filter.logic = this._filter.logic === 'or' ? 'and' : 'or'; this.renderFilterBar(); this.applyFilters(); },
-        applyFilters() { this.renderBlocks(); this.renderOffenders(); this.renderEvents(); },
+        applyFilters() { this.renderBlocks(); this.renderOffenders(); this.renderEvents(); this.renderApps(); },
         renderFilterBar() {
             const $f = $('#nidsFilter');
             if (!$f.length) { return; }
             const tags = this._filter.tags;
-            const icons = { ip: '&#128225;', severity: '&#9873;', category: '&#128278;', source: '&#128230;' };
+            const icons = { ip: '&#128225;', severity: '&#9873;', category: '&#128278;', source: '&#128230;', app: '&#128736;' };
             if (!tags.length) {
-                $f.removeClass('active').html('<span class="fhint">No filters — click a &#127991; icon on any IP, category or source, or a severity badge, to filter.</span>');
+                $f.removeClass('active').html('<span class="fhint">No filters — click a &#127991; icon on any IP, application, category or source, or a severity badge, to filter.</span>');
                 return;
             }
             const logic = this._filter.logic.toUpperCase();
@@ -494,15 +494,16 @@
                 '</tbody></table></div>');
         },
         renderApps() {
-            const rows = this._apps || [];
+            const all = this._apps || [];
+            const rows = all.filter((x) => this._rowMatches({ app: x.app || 'server' }));
             $('#nidsApps').html('<div class="table-wrap"><table class="data"><thead><tr><th>Application</th><th class="num">Sources</th><th class="num">Reqs</th><th class="num">Errors</th><th class="num">Volume</th></tr></thead><tbody>' +
                 (rows.length ? rows.map((x) => (
-                    '<tr class="clickable" data-nidsapp="' + H.esc(x.app || 'server') + '"><td>' + H.esc(x.app || 'server') + '</td>' +
+                    '<tr class="clickable" data-nidsapp="' + H.esc(x.app || 'server') + '"><td>' + H.esc(x.app || 'server') + this.tagBtn('app', x.app || 'server', x.app || 'server') + '</td>' +
                     '<td class="mono">' + (Number(x.sources) || 0).toLocaleString() + '</td>' +
                     '<td class="mono">' + (Number(x.requests) || 0).toLocaleString() + '</td>' +
                     '<td class="mono">' + (Number(x.errors) || 0).toLocaleString() + '</td>' +
                     '<td class="mono">' + H.bytes(x.bytes) + '</td></tr>'
-                )).join('') : '<tr><td colspan="5" class="muted">no application traffic recorded</td></tr>') +
+                )).join('') : '<tr><td colspan="5" class="muted">' + (all.length ? 'no applications match the filter' : 'no application traffic recorded') + '</td></tr>') +
                 '</tbody></table></div>');
         },
         renderResources(d) {
