@@ -1584,6 +1584,7 @@
                 '  <div class="card"><h3>HTTP status codes</h3><div class="chart-box"><canvas id="statusChart"></canvas></div></div>' +
                 '  <div class="card"><h3>Top requested paths</h3><div id="topPaths"></div></div>' +
                 '</div>' +
+                '<div class="card" style="margin-top:16px"><h3>Application usage <span class="sub">reported by each app\u2019s health helper</span></h3><div id="appUsage"></div></div>' +
                 '<div class="card" style="margin-top:16px"><h3>Log viewer ' +
                 '<span class="sub"><select id="logSource"></select> ' +
                 '<button class="btn small ghost" id="logRefresh">↻</button>' +
@@ -1591,7 +1592,7 @@
                 '</span></h3><div class="terminal" id="logView"></div></div>'
             );
             API.get('/logs/sources').then((r) => {
-                $('#logSource').html(r.data.map((s) => '<option>' + H.esc(s) + '</option>').join(''));
+                $('#logSource').html(this.sourceOptions(r.data));
                 this.tail();
             });
             $('#logRefresh, #logSource').on('click change', () => this.tail());
@@ -1600,14 +1601,46 @@
                     res.data.events + ' events, ' + (res.data.auto_blocked || []).length + ' auto-blocked'));
             });
             this.summary();
+            this.appUsage();
+        },
+        // Build the source <select>, grouping system logs and per-app streams.
+        sourceOptions(sources) {
+            const list = (sources || []).map((s) => (typeof s === 'string' ? { key: s, label: s, kind: 'system' } : s));
+            const sys = list.filter((s) => s.kind !== 'app');
+            const apps = list.filter((s) => s.kind === 'app');
+            const opt = (s) => '<option value="' + H.esc(s.key) + '">' + H.esc(s.label) + '</option>';
+            let html = '<optgroup label="System">' + sys.map(opt).join('') + '</optgroup>';
+            if (apps.length) { html += '<optgroup label="Applications">' + apps.map(opt).join('') + '</optgroup>'; }
+            return html;
         },
         tail() {
             const src = $('#logSource').val() || 'syslog';
             $('#logView').text('loading…');
             API.get('/logs/tail?source=' + encodeURIComponent(src) + '&lines=200').then((r) => {
+                if (r.data && r.data.ok === false) { $('#logView').text(r.data.error || '(unavailable)'); return; }
                 $('#logView').text((r.data.lines || []).join('\n') || '(empty)');
                 const el = document.getElementById('logView'); if (el) el.scrollTop = el.scrollHeight;
             });
+        },
+        appUsage() {
+            API.get('/logs/app-usage').then((r) => {
+                const d = r.data || {};
+                if (!d.ok || !(d.apps || []).length) {
+                    $('#appUsage').html('<p class="muted">No application usage reported yet. Managed apps stream logs and usage through their health helper; once collected they appear here.</p>');
+                    return;
+                }
+                $('#appUsage').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Application</th><th class="num">Requests</th><th class="num">Errors</th><th class="num">Error rate</th><th class="num">Sources</th><th class="num">Volume</th><th>Last log</th></tr></thead><tbody>' +
+                    d.apps.map((a) => (
+                        '<tr><td>' + H.esc(a.name) + '</td>' +
+                        '<td class="mono">' + (Number(a.requests) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + (Number(a.errors) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono' + (a.error_rate > 5 ? ' crit' : '') + '">' + a.error_rate + '%</td>' +
+                        '<td class="mono">' + (Number(a.sources) || 0).toLocaleString() + '</td>' +
+                        '<td class="mono">' + H.bytes(a.bytes) + '</td>' +
+                        '<td class="muted">' + (a.last_logged ? H.ago(a.last_logged) : '—') + '</td></tr>'
+                    )).join('') + '</tbody></table></div>');
+            }).catch(() => { $('#appUsage').html('<p class="muted">application usage unavailable</p>'); });
         },
         summary() {
             API.get('/logs/access-summary').then((r) => {

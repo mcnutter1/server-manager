@@ -422,6 +422,10 @@ $get('/logs/access-summary', static function () {
     Response::ok(LogAnalyzer::accessSummary((int) ($_GET['lines'] ?? 5000)));
 });
 
+$get('/logs/app-usage', static function () {
+    Response::ok(LogAnalyzer::appUsageSummary((int) ($_GET['hours'] ?? 24)));
+});
+
 $post('/logs/scan', static function () {
     Auth::requirePrivileged('nids');
     Response::ok(LogAnalyzer::scanForThreats((int) ($_POST['lines'] ?? 1000)));

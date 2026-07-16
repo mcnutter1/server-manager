@@ -15,6 +15,11 @@ final class LogAnalyzer
     /** Tail the last N lines of a known log source safely. */
     public static function tail(string $sourceKey, int $lines = 200): array
     {
+        // Application log streams reported by a managed app's health helper
+        // are stored in the DB (app_log_events), not on disk.
+        if (str_starts_with($sourceKey, 'app:')) {
+            return self::tailAppLog((int) substr($sourceKey, 4), $lines);
+        }
         $path = self::resolveSource($sourceKey);
         if ($path === null) {
             return ['ok' => false, 'error' => 'unknown log source'];
@@ -24,6 +29,42 @@ final class LogAnalyzer
         }
         $lines = max(1, min($lines, 5000));
         return ['ok' => true, 'path' => $path, 'lines' => self::readLastLines($path, $lines)];
+    }
+
+    /**
+     * Tail the most recent log entries an application reported through its
+     * health helper (ingested into app_log_events by the traffic worker),
+     * formatted into human-readable log lines.
+     */
+    private static function tailAppLog(int $appId, int $lines): array
+    {
+        $lines = max(1, min($lines, 5000));
+        try {
+            $rows = Database::instance()->all(
+                "SELECT logged_at, created_at, level, src_ip, method, path, status_code, bytes, message
+                 FROM app_log_events WHERE app_id = ? ORDER BY id DESC LIMIT {$lines}",
+                [$appId]
+            );
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'error' => 'application logs unavailable'];
+        }
+        $rows = array_reverse($rows); // oldest → newest, like a real tail
+        $out = [];
+        foreach ($rows as $r) {
+            $ts     = (string) ($r['logged_at'] ?: $r['created_at'] ?: '');
+            $level  = strtoupper((string) ($r['level'] ?: 'info'));
+            $req    = trim((string) ($r['method'] ?? '') . ' ' . (string) ($r['path'] ?? ''));
+            $status = $r['status_code'] !== null && $r['status_code'] !== '' ? (string) $r['status_code'] : '';
+            $parts  = array_filter(
+                [$ts, '[' . $level . ']', (string) ($r['src_ip'] ?? ''), $req, $status, (string) ($r['message'] ?? '')],
+                static fn ($v) => $v !== '' && $v !== null
+            );
+            $out[] = implode(' ', $parts);
+        }
+        if ($out === []) {
+            return ['ok' => true, 'source' => 'app', 'lines' => ['(no application log entries reported yet)']];
+        }
+        return ['ok' => true, 'source' => 'app', 'lines' => $out];
     }
 
     /** Map a friendly key to a whitelisted path (prevents traversal). */
@@ -38,10 +79,43 @@ final class LogAnalyzer
         return $map[$key] ?? null;
     }
 
+    /**
+     * Log sources for the viewer dropdown: the standard system logs plus one
+     * stream per managed application that has reported logs through its health
+     * helper. Each entry is {key, label, kind}.
+     */
     public static function sources(): array
     {
-        return ['auth', 'apache_access', 'apache_error', 'syslog'];
+        $sources = [
+            ['key' => 'auth',          'label' => 'Auth log',      'kind' => 'system'],
+            ['key' => 'apache_access', 'label' => 'Apache access', 'kind' => 'system'],
+            ['key' => 'apache_error',  'label' => 'Apache error',  'kind' => 'system'],
+            ['key' => 'syslog',        'label' => 'Syslog',        'kind' => 'system'],
+        ];
+
+        try {
+            $apps = Database::instance()->all(
+                "SELECT a.id, a.name, COUNT(e.id) AS n
+                 FROM managed_apps a
+                 JOIN app_log_events e ON e.app_id = a.id
+                 GROUP BY a.id, a.name
+                 HAVING n > 0
+                 ORDER BY a.name"
+            );
+            foreach ($apps as $a) {
+                $sources[] = [
+                    'key'   => 'app:' . (int) $a['id'],
+                    'label' => (string) $a['name'],
+                    'kind'  => 'app',
+                ];
+            }
+        } catch (\Throwable $e) {
+            // app_log_events / managed_apps may not exist yet — system logs only.
+        }
+
+        return $sources;
     }
+
 
     /** Efficient tail without loading the whole file. */
     private static function readLastLines(string $path, int $lines): array
@@ -220,6 +294,66 @@ final class LogAnalyzer
                 : 0,
             'top_paths'     => array_slice($topPaths, 0, 15, true),
             'top_ips'       => array_slice($topIps, 0, 15, true),
+        ];
+    }
+
+    /**
+     * Per-application usage, aggregated from the log entries each managed app
+     * reported through its health helper (app_log_events). This is the "usage
+     * from the application health reporters" that powers the Logs & Usage tab.
+     */
+    public static function appUsageSummary(int $hours = 24): array
+    {
+        $hours = max(1, min($hours, 168));
+        try {
+            $rows = Database::instance()->all(
+                "SELECT a.id, a.name, a.slug,
+                        COUNT(e.id) AS requests,
+                        COALESCE(SUM(e.bytes), 0) AS bytes,
+                        SUM(CASE WHEN e.status_code >= 400 THEN 1 ELSE 0 END) AS errors,
+                        COUNT(DISTINCT e.src_ip) AS sources,
+                        MAX(e.logged_at) AS last_logged
+                 FROM managed_apps a
+                 JOIN app_log_events e ON e.app_id = a.id
+                 WHERE e.created_at >= (NOW() - INTERVAL {$hours} HOUR)
+                 GROUP BY a.id, a.name, a.slug
+                 ORDER BY requests DESC"
+            );
+        } catch (\Throwable $e) {
+            return ['ok' => false, 'error' => 'application usage unavailable', 'apps' => []];
+        }
+
+        $apps = [];
+        $totRequests = 0;
+        $totErrors = 0;
+        $totBytes = 0;
+        foreach ($rows as $r) {
+            $req = (int) $r['requests'];
+            $err = (int) $r['errors'];
+            $totRequests += $req;
+            $totErrors += $err;
+            $totBytes += (int) $r['bytes'];
+            $apps[] = [
+                'id'          => (int) $r['id'],
+                'name'        => (string) $r['name'],
+                'slug'        => (string) $r['slug'],
+                'requests'    => $req,
+                'bytes'       => (int) $r['bytes'],
+                'errors'      => $err,
+                'sources'     => (int) $r['sources'],
+                'error_rate'  => $req > 0 ? round($err / $req * 100, 2) : 0.0,
+                'last_logged' => $r['last_logged'],
+            ];
+        }
+
+        return [
+            'ok'            => true,
+            'window_hours'  => $hours,
+            'total_apps'    => count($apps),
+            'total_requests' => $totRequests,
+            'total_errors'  => $totErrors,
+            'total_bytes'   => $totBytes,
+            'apps'          => $apps,
         ];
     }
 }
