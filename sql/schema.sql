@@ -368,5 +368,5 @@ CREATE TABLE IF NOT EXISTS ip_reputation (
 
 -- Seed a couple of defaults.
 INSERT INTO settings (skey, svalue) VALUES
-    ('schema_version', '"1.7.0"')
+    ('schema_version', '"1.8.0"')
 ON DUPLICATE KEY UPDATE svalue = VALUES(svalue);

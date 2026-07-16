@@ -46,6 +46,9 @@ $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_
             <a href="#logs"      class="nav-item" data-view="logs"><span class="ico">&#128196;</span> Logs &amp; Usage</a>
             <a href="#runner"    class="nav-item" data-view="runner"><span class="ico">&#9002;_</span> CLI Runner</a>
             <a href="#audit"     class="nav-item" data-view="audit"><span class="ico">&#128220;</span> Audit</a>
+            <?php if ($isAdmin): ?>
+            <a href="#settings"  class="nav-item" data-view="settings"><span class="ico">&#9881;</span> Settings</a>
+            <?php endif; ?>
         </nav>
         <div class="sidebar-foot">
             <div class="user">
@@ -87,6 +90,9 @@ $isAdmin = (bool) array_intersect($user['roles'] ?? [], \App\config('auth.admin_
             <div class="view hidden" id="view-logs"></div>
             <div class="view hidden" id="view-runner"></div>
             <div class="view hidden" id="view-audit"></div>
+            <?php if ($isAdmin): ?>
+            <div class="view hidden" id="view-settings"></div>
+            <?php endif; ?>
         </section>
     </main>
 </div>

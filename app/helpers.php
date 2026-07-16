@@ -9,19 +9,57 @@ namespace App;
  */
 final class Config
 {
+    /** Effective config (file values with any DB overrides applied). */
     private static array $data = [];
+    /** Pristine file-based config, never mutated by overrides. */
+    private static array $fileDefaults = [];
 
     public static function init(array $data): void
     {
         self::$data = $data;
+        self::$fileDefaults = $data;
     }
 
     /** Dot-notation getter: Config::get('db.host'). */
     public static function get(string $key, mixed $default = null): mixed
     {
+        return self::dig(self::$data, $key, $default);
+    }
+
+    /**
+     * Read the original file-based value, ignoring any runtime DB override.
+     * Used by the Settings UI to show the underlying default.
+     */
+    public static function fileDefault(string $key, mixed $default = null): mixed
+    {
+        return self::dig(self::$fileDefaults, $key, $default);
+    }
+
+    /**
+     * Overlay a runtime value onto the effective config using dot-notation.
+     * Does not touch the pristine file defaults.
+     */
+    public static function overlay(string $key, mixed $value): void
+    {
         $segments = explode('.', $key);
-        $value = self::$data;
-        foreach ($segments as $segment) {
+        $ref = &self::$data;
+        foreach ($segments as $i => $segment) {
+            if ($i === count($segments) - 1) {
+                $ref[$segment] = $value;
+                break;
+            }
+            if (!isset($ref[$segment]) || !is_array($ref[$segment])) {
+                $ref[$segment] = [];
+            }
+            $ref = &$ref[$segment];
+        }
+        unset($ref);
+    }
+
+    private static function dig(array $source, string $key, mixed $default): mixed
+    {
+        $value = $source;
+        foreach (explode('.', $key) as $segment) {
             if (is_array($value) && array_key_exists($segment, $value)) {
                 $value = $value[$segment];
             } else {

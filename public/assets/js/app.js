@@ -305,13 +305,9 @@
                 '<div class="grid cols-2" style="margin-top:16px">' +
                 '  <div class="card"><h3>Top offenders <span class="sub">24h</span></h3><div id="offenders"></div></div>' +
                 '  <div class="card"><h3>Recent events</h3><div id="nidsEvents"></div></div>' +
-                '</div>' +
-                '<div class="section-head" style="margin-top:16px"><h2>Never block <span class="sub">allowlist · IPv4 · IPv6 · CIDR</span></h2>' +
-                (SM.admin ? '<div class="actions"><button class="btn" id="neverBlockBtn">＋ Add address</button></div>' : '') + '</div>' +
-                '<div class="card"><p class="muted" style="margin-top:0">These addresses and ranges are never auto-blocked or manually blocked, protecting your own control-plane, monitoring and office IPs.</p><div id="neverBlockTable"></div></div>'
+                '</div>'
             );
             $('#blockBtn').on('click', () => this.blockModal());
-            if (SM.admin) { $('#neverBlockBtn').on('click', () => this.neverBlockModal()); }
             this.load();
         },
         load() {
@@ -372,35 +368,6 @@
                         '<td>' + H.esc(e.category) + '</td><td><span class="badge ' + H.esc(e.severity) + '">' + H.esc(e.severity) + '</span></td></tr>'
                     )).join('') + '</tbody></table></div>');
                 $('#nidsEvents tr[data-nidsip]').on('click', function () { Views.nids.openIp($(this).data('nidsip')); });
-            });
-            this.loadNeverBlock();
-        },
-        loadNeverBlock() {
-            UI.loading($('#neverBlockTable'));
-            API.get('/nids/never-block').then((r) => {
-                const entries = r.data.entries || [], cfg = r.data.config || [];
-                const cfgRows = cfg.map((ip) => (
-                    '<tr><td class="mono">' + H.esc(ip) + '</td><td class="muted">config baseline</td>' +
-                    '<td class="muted">—</td>' + (SM.admin ? '<td class="muted" style="text-align:right">read-only</td>' : '') + '</tr>'
-                )).join('');
-                const rows = entries.map((e) => (
-                    '<tr><td class="mono">' + H.esc(e.ip) + '</td>' +
-                    '<td>' + (e.note ? H.esc(e.note) : '<span class="muted">—</span>') + '</td>' +
-                    '<td class="muted">' + H.esc(e.added_by || '') + (e.added_at ? ' · ' + H.ago(e.added_at) : '') + '</td>' +
-                    (SM.admin ? '<td style="text-align:right"><button class="btn small ghost" data-nbremove="' + H.esc(e.ip) + '">Remove</button></td>' : '') + '</tr>'
-                )).join('');
-                $('#neverBlockTable').html('<div class="table-wrap"><table class="data"><thead><tr>' +
-                    '<th>Address / range</th><th>Note</th><th>Added</th>' + (SM.admin ? '<th></th>' : '') + '</tr></thead><tbody>' +
-                    cfgRows + rows +
-                    (!cfg.length && !entries.length ? '<tr><td colspan="4" class="muted">No allowlist entries.</td></tr>' : '') +
-                    '</tbody></table></div>');
-                $('#neverBlockTable [data-nbremove]').on('click', function () {
-                    const ip = $(this).data('nbremove');
-                    UI.confirm('Remove ' + ip + ' from the never-block list?', () => API.post('/nids/never-block/remove', { ip: String(ip) }).then((res) => {
-                        if (res.data.ok) { UI.toast('success', 'Removed', String(ip)); Views.nids.loadNeverBlock(); }
-                        else UI.toast('error', 'Remove failed', res.data.error);
-                    }));
-                });
             });
         },
         // ---- IP dossier drill-down -----------------------------------
@@ -583,23 +550,6 @@
                 html += V.miniTable('Recent requests', d.recent, [['at', 'Time', 'ago'], ['method', 'Method'], ['path', 'Path'], ['status_code', 'Status'], ['bytes', 'Bytes', 'bytes']]);
             }
             return html;
-        },
-        neverBlockModal() {
-            UI.modal('Add to never-block list',
-                '<div class="field"><label>IP address or CIDR range</label><input name="ip" placeholder="203.0.113.10  ·  2001:db8::/32"></div>' +
-                '<div class="field"><label>Note <span class="muted">(optional)</span></label><input name="note" placeholder="Office uplink"></div>' +
-                '<p class="muted">IPv4, IPv6 and CIDR ranges are supported. Any active block covered by this entry is lifted immediately.</p>',
-                (d, close) => {
-                    if (!d.ip) { UI.toast('warn', 'Address required'); return; }
-                    API.post('/nids/never-block', { ip: d.ip, note: d.note })
-                        .then((res) => {
-                            if (res.data.ok) {
-                                const un = (res.data.unblocked || []).length;
-                                UI.toast('success', 'Added to never-block', d.ip + (un ? ' · unblocked ' + un : ''));
-                                close(); Views.nids.load();
-                            } else UI.toast('error', 'Add failed', res.data.error);
-                        });
-                }, 'Add');
         },
         blockModal() {
             UI.modal('Block a host',
@@ -1623,11 +1573,210 @@
         }
     };
 
+    // ---- Settings (admin only) ---------------------------------------
+    Views.settings = {
+        title: 'Settings',
+        _groups: [],
+        render($el) {
+            $el.html(
+                '<div class="grid cols-4" id="settingsStats"></div>' +
+                '<div class="settings-statextra card" id="settingsStatExtra" style="margin-top:12px"></div>' +
+                '<div class="section-head" style="margin-top:20px"><h2>Configuration</h2>' +
+                '<div class="actions"><label class="auto-toggle"><input type="checkbox" id="settingsAdvanced"> Show advanced</label>' +
+                '<button class="btn primary" id="settingsSave" disabled>Save changes</button></div></div>' +
+                '<p class="muted" style="margin-top:0">Changes are stored in the database and overlaid on top of <code>config.php</code>, taking effect immediately. Secrets such as the database password and runner token stay file-only and are never shown here.</p>' +
+                '<div id="settingsGroups"></div>' +
+                '<div class="section-head" style="margin-top:24px"><h2>Never block <span class="sub">allowlist · IPv4 · IPv6 · CIDR</span></h2>' +
+                '<div class="actions"><button class="btn" id="nbAddBtn">＋ Add address</button></div></div>' +
+                '<div class="card"><p class="muted" style="margin-top:0">These addresses and ranges are never auto-blocked or manually blocked, protecting your own control-plane, monitoring and office IPs.</p><div id="nbTable"></div></div>'
+            );
+            $('#settingsSave').on('click', () => this.save());
+            $('#settingsAdvanced').on('change', function () {
+                $('#settingsGroups').toggleClass('show-advanced', $(this).is(':checked'));
+            });
+            $('#nbAddBtn').on('click', () => this.neverBlockModal());
+            this.load();
+        },
+        load() {
+            this.loadStats();
+            this.loadSettings();
+            this.loadNeverBlock();
+        },
+        loadStats() {
+            API.get('/settings/stats').then((r) => {
+                const s = r.data, sys = s.system || {}, sec = s.security || {},
+                      ti = s.threat_intel || {}, tr = s.traffic || {}, ap = s.apps || {};
+                $('#settingsStats').html(
+                    statBox('Managed apps', ap.total || 0) +
+                    statBox('Active blocks', sec.active_blocks || 0) +
+                    statBox('NIDS events 24h', sec.events_24h || 0, (sec.critical_24h || 0) > 0 ? 'crit' : '') +
+                    statBox('Malicious IPs', ti.malicious_known || 0, (ti.malicious_known || 0) > 0 ? 'crit' : '')
+                );
+                const healthBits = Object.keys(ap.health || {}).map((k) =>
+                    '<span class="badge ' + H.esc(k) + '">' + H.esc(k) + ' ' + (ap.health[k]) + '</span>').join(' ');
+                const row = (label, val) => '<div class="kv"><span class="k">' + H.esc(label) + '</span><span class="v">' + val + '</span></div>';
+                $('#settingsStatExtra').html(
+                    '<div class="statgrid">' +
+                    row('Host', H.esc(sys.hostname || '—') + ' <span class="muted">' + H.esc(sys.os || '') + '</span>') +
+                    row('PHP', H.esc(sys.php_version || '—')) +
+                    row('Schema version', '<span class="mono">' + H.esc(sys.schema_version || '—') + '</span>') +
+                    row('Database size', sys.db_size_bytes != null ? H.bytes(sys.db_size_bytes) : '—') +
+                    row('App health', healthBits || '<span class="muted">none</span>') +
+                    row('Threat intel', (ti.enabled ? '<span class="badge active">on</span>' : '<span class="badge">off</span>') +
+                        ' · ' + (ti.dnsbl_enabled ? (ti.dnsbl_count || 0) + ' DNSBLs' : 'DNSBL off') +
+                        ' · ' + (ti.abuseipdb ? '<span class="badge active">AbuseIPDB</span>' : '<span class="muted">no AbuseIPDB key</span>') +
+                        ' · ' + (ti.auto_block ? '<span class="badge failed">auto-block</span>' : 'manual')) +
+                    row('IP reputation', (ti.checked_total || 0).toLocaleString() + ' checked' +
+                        (ti.last_checked ? ' · last ' + H.ago(ti.last_checked) : '')) +
+                    row('Traffic', (tr.enabled ? '' : '<span class="badge">off</span> ') +
+                        (tr.events || 0).toLocaleString() + ' events · ' + (tr.distinct_src || 0).toLocaleString() +
+                        ' sources · ' + (tr.geo_cache || 0).toLocaleString() + ' geo cached') +
+                    '</div>'
+                );
+            });
+        },
+        loadSettings() {
+            UI.loading($('#settingsGroups'));
+            API.get('/settings').then((r) => {
+                this._groups = r.data.groups || [];
+                const html = this._groups.map((g, gi) => {
+                    const rows = g.settings.map((s) => this.settingRow(s)).join('');
+                    return '<div class="settings-group card" data-group="' + gi + '">' +
+                        '<div class="sg-head"><h3>' + H.esc(g.name) + '</h3><span class="sg-toggle">▾</span></div>' +
+                        '<div class="sg-body">' + rows + '</div></div>';
+                }).join('');
+                $('#settingsGroups').html(html || '<div class="card muted">No settings.</div>');
+
+                $('#settingsGroups .sg-head').on('click', function () {
+                    $(this).closest('.settings-group').toggleClass('collapsed');
+                });
+                const self = this;
+                $('#settingsGroups').find('input,select').on('input change', function () {
+                    $(this).closest('.setting').addClass('dirty');
+                    $('#settingsSave').prop('disabled', false);
+                });
+                $('#settingsGroups [data-reset]').on('click', function (e) {
+                    e.preventDefault();
+                    const key = $(this).data('reset');
+                    UI.confirm('Reset "' + key + '" to its file default?', () =>
+                        API.post('/settings/reset', { key: String(key) }).then(() => {
+                            UI.toast('success', 'Reset', String(key)); self.load();
+                        }));
+                });
+            });
+        },
+        settingRow(s) {
+            const cls = 'setting' + (s.advanced ? ' advanced' : '') + (s.overridden ? ' overridden' : '');
+            const badge = s.overridden
+                ? '<a href="#" class="setting-reset" data-reset="' + H.esc(s.key) + '" title="Revert to file default">overridden · reset</a>'
+                : '';
+            return '<div class="' + cls + '" data-skey="' + H.esc(s.key) + '" data-stype="' + H.esc(s.type) + '">' +
+                '<div class="setting-main">' +
+                '<label class="setting-label">' + H.esc(s.label) + '</label>' +
+                (s.help ? '<div class="setting-help muted">' + H.esc(s.help) + '</div>' : '') +
+                '</div>' +
+                '<div class="setting-control">' + this.settingInput(s) + '</div>' +
+                '<div class="setting-meta">' + badge + '</div>' +
+                '</div>';
+        },
+        settingInput(s) {
+            const key = H.esc(s.key);
+            if (s.type === 'bool') {
+                return '<label class="switch"><input type="checkbox" data-field="' + key + '"' +
+                    (s.value ? ' checked' : '') + '><span class="track"></span></label>';
+            }
+            if (s.type === 'select') {
+                return '<select data-field="' + key + '">' + (s.options || []).map((o) =>
+                    '<option value="' + H.esc(o) + '"' + (String(o) === String(s.value) ? ' selected' : '') + '>' + H.esc(o) + '</option>'
+                ).join('') + '</select>';
+            }
+            if (s.type === 'password') {
+                return '<input type="password" autocomplete="new-password" data-field="' + key + '" data-sensitive="1" placeholder="' +
+                    (s.has_value ? '•••••••• (set — leave blank to keep)' : 'not set') + '">';
+            }
+            if (s.type === 'int' || s.type === 'float') {
+                const step = s.type === 'float' ? ' step="0.1"' : '';
+                const min = (s.min != null ? ' min="' + s.min + '"' : '');
+                const max = (s.max != null ? ' max="' + s.max + '"' : '');
+                return '<input type="number"' + step + min + max + ' data-field="' + key + '" value="' + H.esc(s.value) + '">';
+            }
+            // string, text, csv
+            const ph = s.type === 'csv' ? ' placeholder="comma, separated, values"' : '';
+            return '<input type="text" data-field="' + key + '"' + ph + ' value="' + H.esc(s.value) + '">';
+        },
+        save() {
+            const values = {};
+            $('#settingsGroups .setting.dirty').each(function () {
+                const $s = $(this), $f = $s.find('[data-field]'), key = $f.data('field');
+                if (!key) { return; }
+                if ($f.is(':checkbox')) { values[key] = $f.is(':checked'); return; }
+                const v = $f.val();
+                if ($f.data('sensitive') && (v === '' || v == null)) { return; } // unchanged secret
+                values[key] = v;
+            });
+            if (!Object.keys(values).length) { UI.toast('warn', 'Nothing changed'); return; }
+            $('#settingsSave').prop('disabled', true);
+            API.post('/settings', { values: values }).then((r) => {
+                const d = r.data || {};
+                if (d.ok) { UI.toast('success', 'Saved', d.saved + ' setting(s) updated'); }
+                else {
+                    const first = d.errors ? Object.keys(d.errors)[0] : null;
+                    UI.toast('error', 'Some settings rejected', first ? first + ': ' + d.errors[first] : 'validation error');
+                }
+                this.load();
+            }).catch(() => { $('#settingsSave').prop('disabled', false); });
+        },
+        loadNeverBlock() {
+            UI.loading($('#nbTable'));
+            API.get('/nids/never-block').then((r) => {
+                const entries = r.data.entries || [], cfg = r.data.config || [];
+                const cfgRows = cfg.map((ip) => (
+                    '<tr><td class="mono">' + H.esc(ip) + '</td><td class="muted">config baseline</td>' +
+                    '<td class="muted">—</td><td class="muted" style="text-align:right">read-only</td></tr>'
+                )).join('');
+                const rows = entries.map((e) => (
+                    '<tr><td class="mono">' + H.esc(e.ip) + '</td>' +
+                    '<td>' + (e.note ? H.esc(e.note) : '<span class="muted">—</span>') + '</td>' +
+                    '<td class="muted">' + H.esc(e.added_by || '') + (e.added_at ? ' · ' + H.ago(e.added_at) : '') + '</td>' +
+                    '<td style="text-align:right"><button class="btn small ghost" data-nbremove="' + H.esc(e.ip) + '">Remove</button></td></tr>'
+                )).join('');
+                $('#nbTable').html('<div class="table-wrap"><table class="data"><thead><tr>' +
+                    '<th>Address / range</th><th>Note</th><th>Added</th><th></th></tr></thead><tbody>' +
+                    cfgRows + rows +
+                    (!cfg.length && !entries.length ? '<tr><td colspan="4" class="muted">No allowlist entries.</td></tr>' : '') +
+                    '</tbody></table></div>');
+                $('#nbTable [data-nbremove]').on('click', function () {
+                    const ip = $(this).data('nbremove');
+                    UI.confirm('Remove ' + ip + ' from the never-block list?', () => API.post('/nids/never-block/remove', { ip: String(ip) }).then((res) => {
+                        if (res.data.ok) { UI.toast('success', 'Removed', String(ip)); Views.settings.loadNeverBlock(); }
+                        else UI.toast('error', 'Remove failed', res.data.error);
+                    }));
+                });
+            });
+        },
+        neverBlockModal() {
+            UI.modal('Add to never-block list',
+                '<div class="field"><label>IP address or CIDR range</label><input name="ip" placeholder="203.0.113.10  ·  2001:db8::/32"></div>' +
+                '<div class="field"><label>Note <span class="muted">(optional)</span></label><input name="note" placeholder="Office uplink"></div>' +
+                '<p class="muted">IPv4, IPv6 and CIDR ranges are supported. Any active block covered by this entry is lifted immediately.</p>',
+                (d, close) => {
+                    if (!d.ip) { UI.toast('warn', 'Address required'); return; }
+                    API.post('/nids/never-block', { ip: d.ip, note: d.note })
+                        .then((res) => {
+                            if (res.data.ok) {
+                                const un = (res.data.unblocked || []).length;
+                                UI.toast('success', 'Added to never-block', d.ip + (un ? ' · unblocked ' + un : ''));
+                                close(); Views.settings.loadNeverBlock();
+                            } else UI.toast('error', 'Add failed', res.data.error);
+                        });
+                }, 'Add');
+        }
+    };
+
     // -----------------------------------------------------------------
     // Shared render helpers
     // -----------------------------------------------------------------
-    function statBox(label, value, cls) {
-        return '<div class="card"><div class="stat"><span class="label">' + H.esc(label) + '</span>' +
+    function statBox(label, value, cls) {        return '<div class="card"><div class="stat"><span class="label">' + H.esc(label) + '</span>' +
             '<span class="value ' + (cls || '') + '" style="' + (cls === 'crit' ? 'color:var(--crit)' : '') + '">' + H.esc(value) + '</span></div></div>';
     }
     function ds(label, data, color) {

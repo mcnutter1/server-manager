@@ -20,6 +20,7 @@ use App\ServiceManager;
 use App\FirewallManager;
 use App\NidsManager;
 use App\ThreatIntel;
+use App\Settings;
 use App\AppManager;
 use App\PairManager;
 use App\LogAnalyzer;
@@ -477,6 +478,43 @@ $get('/audit', static function () {
         'SELECT * FROM audit_log ORDER BY created_at DESC LIMIT 200'
     );
     Response::ok($rows);
+});
+
+// =====================================================================
+// Settings (admin only) — grouped registry + statistics
+// =====================================================================
+$get('/settings', static function () {
+    Auth::requirePrivileged('admin');
+    Response::ok([
+        'groups' => Settings::groups(),
+    ]);
+});
+
+$get('/settings/stats', static function () {
+    Auth::requirePrivileged('admin');
+    Response::ok(Settings::stats());
+});
+
+$post('/settings', static function () use ($input) {
+    Auth::requirePrivileged('admin');
+    $values = $input['values'] ?? null;
+    if (!is_array($values)) {
+        Response::error('Expected a "values" object of key => value pairs.', 400);
+        return;
+    }
+    $result = Settings::saveMany($values, Auth::currentActor()['name']);
+    Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 422);
+});
+
+$post('/settings/reset', static function () use ($input) {
+    Auth::requirePrivileged('admin');
+    $key = trim((string) ($input['key'] ?? ''));
+    if ($key === '') {
+        Response::error('Missing setting key.', 400);
+        return;
+    }
+    $result = Settings::reset($key, Auth::currentActor()['name']);
+    Response::json(['ok' => $result['ok'], 'data' => $result], $result['ok'] ? 200 : 400);
 });
 
 // ---------------------------------------------------------------------

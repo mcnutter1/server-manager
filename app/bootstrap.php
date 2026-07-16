@@ -54,3 +54,12 @@ require_once SM_ROOT . '/app/helpers.php';
 
 // Make config globally reachable through a container-lite accessor.
 App\Config::init($CONFIG);
+
+// Overlay operator-editable settings stored in the database on top of the
+// file config, so UI-driven changes take effect app-wide. Best-effort:
+// never fatal if the database is unreachable during early boot.
+try {
+    App\Settings::applyOverrides();
+} catch (\Throwable $e) {
+    error_log('[bootstrap] settings overlay skipped: ' . $e->getMessage());
+}
